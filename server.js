@@ -257,10 +257,10 @@ app.post("/checkUnlink", async (req, res) => {
 // ===============================
 // 🔥 TEST ROBLOX GROUP API
 // ===============================
-app.get("/testgroup", async (req, res) => {
+app.get("/testroles", async (req, res) => {
   try {
     const response = await fetch(
-      `https://apis.roblox.com/groups/v1/groups/${GROUP_ID}`,
+      `https://apis.roblox.com/groups/v1/groups/${GROUP_ID}/roles`,
       {
         headers: {
           "x-api-key": ROBLOX_API_KEY
@@ -273,7 +273,7 @@ app.get("/testgroup", async (req, res) => {
 
   } catch (err) {
     console.error(err);
-    res.status(500).send("Error testing group");
+    res.status(500).send("Error testing roles");
   }
 });
 
@@ -286,3 +286,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running");
 });
+
