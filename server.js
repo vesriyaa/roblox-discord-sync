@@ -16,8 +16,9 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
 const API_KEY = process.env.API_KEY;
 
-// 🔹 PUT YOUR VERIFIED ROLE ID HERE
+// 🔹 ROLE IDS
 const VERIFIED_ROLE_ID = "1477834795512893520";
+const MOD_ROLE_ID = "1477872215801331763";
 
 // 🔹 Team → Role mapping
 const roleMap = {
@@ -27,8 +28,9 @@ const roleMap = {
   "Chasers": "1477828132269457559"
 };
 
-// Temporary in-memory verification storage
-const verificationCodes = new Map(); // code -> discordId
+// In-memory stores
+const verificationCodes = new Map();
+const unlinkedUsers = new Set();
 
 // ===============================
 // BOT READY
@@ -38,11 +40,27 @@ client.once("ready", async () => {
 
   const guild = await client.guilds.fetch(GUILD_ID);
 
-  // Register slash command
   await guild.commands.create(
     new SlashCommandBuilder()
       .setName("verify")
       .setDescription("Get a verification code for Roblox")
+  );
+
+  await guild.commands.create(
+    new SlashCommandBuilder()
+      .setName("unlink")
+      .setDescription("Unlink a user's Roblox account")
+      .addUserOption(option =>
+        option.setName("user")
+          .setDescription("User to unlink")
+          .setRequired(true)
+      )
+  );
+
+  await guild.commands.create(
+    new SlashCommandBuilder()
+      .setName("getroles")
+      .setDescription("Restore your team roles from Roblox")
   );
 });
 
@@ -52,13 +70,90 @@ client.once("ready", async () => {
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.commandName === "verify") {
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+  const guild = await client.guilds.fetch(GUILD_ID);
+  const member = await guild.members.fetch(interaction.user.id);
 
+  // ===============================
+  // VERIFY
+  // ===============================
+  if (interaction.commandName === "verify") {
+
+    if (member.roles.cache.has(VERIFIED_ROLE_ID)) {
+      return interaction.reply({
+        content: "❌ You are already verified. A moderator must unlink you first.",
+        ephemeral: true
+      });
+    }
+
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
     verificationCodes.set(code, interaction.user.id);
 
-    await interaction.reply({
-      content: `Your verification code is: **${code}**\nEnter this in the command bar in-game.`,
+    return interaction.reply({
+      content: `Your verification code is: **${code}**\nEnter this in-game.`,
+      ephemeral: true
+    });
+  }
+
+  // ===============================
+  // UNLINK (MOD ONLY)
+  // ===============================
+  if (interaction.commandName === "unlink") {
+
+    if (!member.roles.cache.has(MOD_ROLE_ID)) {
+      return interaction.reply({
+        content: "❌ You do not have permission to use this command.",
+        ephemeral: true
+      });
+    }
+
+    const targetUser = interaction.options.getUser("user");
+    const targetMember = await guild.members.fetch(targetUser.id);
+
+    try {
+
+      // Remove verified role
+      if (targetMember.roles.cache.has(VERIFIED_ROLE_ID)) {
+        await targetMember.roles.remove(VERIFIED_ROLE_ID);
+      }
+
+      // Remove team roles
+      for (const roleId of Object.values(roleMap)) {
+        if (targetMember.roles.cache.has(roleId)) {
+          await targetMember.roles.remove(roleId);
+        }
+      }
+
+      // Add to unlink queue
+      unlinkedUsers.add(targetUser.id);
+
+      return interaction.reply({
+        content: `✅ Successfully unlinked ${targetUser.tag}`,
+        ephemeral: true
+      });
+
+    } catch (err) {
+      console.error("Unlink error:", err);
+      return interaction.reply({
+        content: "❌ Failed to unlink user.",
+        ephemeral: true
+      });
+    }
+  }
+
+  // ===============================
+  // GET ROLES
+  // ===============================
+  if (interaction.commandName === "getroles") {
+
+    if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
+      return interaction.reply({
+        content: "❌ You must be verified first.",
+        ephemeral: true
+      });
+    }
+
+    return interaction.reply({
+      content: "✅ Your roles will sync automatically when you rejoin Roblox.",
       ephemeral: true
     });
   }
@@ -67,7 +162,7 @@ client.on("interactionCreate", async (interaction) => {
 client.login(BOT_TOKEN);
 
 // ===============================
-// VERIFY ENDPOINT
+// VERIFY ENDPOINT (Roblox → Bot)
 // ===============================
 app.post("/verify", async (req, res) => {
 
@@ -88,27 +183,25 @@ app.post("/verify", async (req, res) => {
     const guild = await client.guilds.fetch(GUILD_ID);
     const member = await guild.members.fetch(discordId);
 
-    // Give Verified role
-    if (VERIFIED_ROLE_ID) {
-      await member.roles.add(VERIFIED_ROLE_ID);
+    if (member.roles.cache.has(VERIFIED_ROLE_ID)) {
+      return res.status(400).send("Already verified");
     }
 
-    // Send DM confirmation
+    await member.roles.add(VERIFIED_ROLE_ID);
+
     try {
       await member.send("✅ You have successfully verified your Roblox account!");
-    } catch (dmError) {
-      console.log("Could not DM user (DMs closed)");
-    }
+    } catch {}
 
   } catch (err) {
-    console.error("Verification role error:", err);
+    console.error("Verification error:", err);
   }
 
   res.json({ discordId });
 });
 
 // ===============================
-// TEAM ROLE SYNC ENDPOINT
+// TEAM ROLE SYNC (Roblox → Bot)
 // ===============================
 app.post("/updateRole", async (req, res) => {
 
@@ -117,7 +210,6 @@ app.post("/updateRole", async (req, res) => {
   }
 
   const { discordId, team } = req.body;
-
   if (!discordId || !team) {
     return res.status(400).send("Missing data");
   }
@@ -131,14 +223,12 @@ app.post("/updateRole", async (req, res) => {
       return res.status(400).send("Invalid team");
     }
 
-    // Remove old team roles
     for (const roleId of Object.values(roleMap)) {
       if (member.roles.cache.has(roleId)) {
         await member.roles.remove(roleId);
       }
     }
 
-    // Add new team role
     await member.roles.add(newRoleId);
 
     res.send("Role updated");
@@ -147,6 +237,28 @@ app.post("/updateRole", async (req, res) => {
     console.error("Role update error:", err);
     res.status(500).send("Error assigning role");
   }
+});
+
+// ===============================
+// CHECK UNLINK (Roblox → Bot)
+// ===============================
+app.post("/checkUnlink", async (req, res) => {
+
+  if (req.headers["x-api-key"] !== API_KEY) {
+    return res.status(403).send("Unauthorized");
+  }
+
+  const { discordId } = req.body;
+  if (!discordId) {
+    return res.status(400).send("Missing discordId");
+  }
+
+  if (unlinkedUsers.has(discordId)) {
+    unlinkedUsers.delete(discordId);
+    return res.json({ unlinked: true });
+  }
+
+  res.json({ unlinked: false });
 });
 
 // ===============================
