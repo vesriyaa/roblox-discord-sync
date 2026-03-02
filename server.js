@@ -7,7 +7,8 @@ app.use(express.json());
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.DirectMessages
   ]
 });
 
@@ -15,6 +16,10 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
 const API_KEY = process.env.API_KEY;
 
+// 🔹 PUT YOUR VERIFIED ROLE ID HERE
+const VERIFIED_ROLE_ID = "1477834795512893520";
+
+// 🔹 Team → Role mapping
 const roleMap = {
   "Crimson Blades": "1477828058949091481",
   "Vanguard": "1477828166025220178",
@@ -22,15 +27,18 @@ const roleMap = {
   "Chasers": "1477828132269457559"
 };
 
-const verificationCodes = new Map(); 
-// code -> discordId
+// Temporary in-memory verification storage
+const verificationCodes = new Map(); // code -> discordId
 
+// ===============================
+// BOT READY
+// ===============================
 client.once("ready", async () => {
   console.log("Bot is online");
 
-  // Register slash command
   const guild = await client.guilds.fetch(GUILD_ID);
 
+  // Register slash command
   await guild.commands.create(
     new SlashCommandBuilder()
       .setName("verify")
@@ -38,17 +46,19 @@ client.once("ready", async () => {
   );
 });
 
+// ===============================
+// SLASH COMMAND HANDLER
+// ===============================
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === "verify") {
-
     const code = Math.floor(100000 + Math.random() * 900000).toString();
 
     verificationCodes.set(code, interaction.user.id);
 
     await interaction.reply({
-      content: `Your verification code is: **${code}**\nEnter this in Roblox.`,
+      content: `Your verification code is: **${code}**\nEnter this in the command bar in-game.`,
       ephemeral: true
     });
   }
@@ -56,14 +66,16 @@ client.on("interactionCreate", async (interaction) => {
 
 client.login(BOT_TOKEN);
 
-app.post("/verify", (req, res) => {
+// ===============================
+// VERIFY ENDPOINT
+// ===============================
+app.post("/verify", async (req, res) => {
 
   if (req.headers["x-api-key"] !== API_KEY) {
     return res.status(403).send("Unauthorized");
   }
 
   const { code } = req.body;
-
   const discordId = verificationCodes.get(code);
 
   if (!discordId) {
@@ -72,9 +84,32 @@ app.post("/verify", (req, res) => {
 
   verificationCodes.delete(code);
 
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const member = await guild.members.fetch(discordId);
+
+    // Give Verified role
+    if (VERIFIED_ROLE_ID) {
+      await member.roles.add(VERIFIED_ROLE_ID);
+    }
+
+    // Send DM confirmation
+    try {
+      await member.send("✅ You have successfully verified your Roblox account!");
+    } catch (dmError) {
+      console.log("Could not DM user (DMs closed)");
+    }
+
+  } catch (err) {
+    console.error("Verification role error:", err);
+  }
+
   res.json({ discordId });
 });
 
+// ===============================
+// TEAM ROLE SYNC ENDPOINT
+// ===============================
 app.post("/updateRole", async (req, res) => {
 
   if (req.headers["x-api-key"] !== API_KEY) {
@@ -96,22 +131,25 @@ app.post("/updateRole", async (req, res) => {
       return res.status(400).send("Invalid team");
     }
 
+    // Remove old team roles
     for (const roleId of Object.values(roleMap)) {
       if (member.roles.cache.has(roleId)) {
         await member.roles.remove(roleId);
       }
     }
 
+    // Add new team role
     await member.roles.add(newRoleId);
 
     res.send("Role updated");
 
   } catch (err) {
-    console.error(err);
+    console.error("Role update error:", err);
     res.status(500).send("Error assigning role");
   }
 });
 
+// ===============================
 app.get("/", (req, res) => {
   res.send("Bot running");
 });
