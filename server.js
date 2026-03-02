@@ -15,6 +15,8 @@ const client = new Client({
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
 const API_KEY = process.env.API_KEY;
+const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY;
+const GROUP_ID = process.env.GROUP_ID;
 
 // 🔹 ROLE IDS
 const VERIFIED_ROLE_ID = "1477834795512893520";
@@ -73,9 +75,7 @@ client.on("interactionCreate", async (interaction) => {
   const guild = await client.guilds.fetch(GUILD_ID);
   const member = await guild.members.fetch(interaction.user.id);
 
-  // ===============================
   // VERIFY
-  // ===============================
   if (interaction.commandName === "verify") {
 
     if (member.roles.cache.has(VERIFIED_ROLE_ID)) {
@@ -94,9 +94,7 @@ client.on("interactionCreate", async (interaction) => {
     });
   }
 
-  // ===============================
-  // UNLINK (MOD ONLY)
-  // ===============================
+  // UNLINK
   if (interaction.commandName === "unlink") {
 
     if (!member.roles.cache.has(MOD_ROLE_ID)) {
@@ -111,19 +109,16 @@ client.on("interactionCreate", async (interaction) => {
 
     try {
 
-      // Remove verified role
       if (targetMember.roles.cache.has(VERIFIED_ROLE_ID)) {
         await targetMember.roles.remove(VERIFIED_ROLE_ID);
       }
 
-      // Remove team roles
       for (const roleId of Object.values(roleMap)) {
         if (targetMember.roles.cache.has(roleId)) {
           await targetMember.roles.remove(roleId);
         }
       }
 
-      // Add to unlink queue
       unlinkedUsers.add(targetUser.id);
 
       return interaction.reply({
@@ -140,9 +135,7 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 
-  // ===============================
   // GET ROLES
-  // ===============================
   if (interaction.commandName === "getroles") {
 
     if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
@@ -259,6 +252,29 @@ app.post("/checkUnlink", async (req, res) => {
   }
 
   res.json({ unlinked: false });
+});
+
+// ===============================
+// 🔥 TEST ROBLOX GROUP API
+// ===============================
+app.get("/testgroup", async (req, res) => {
+  try {
+    const response = await fetch(
+      `https://apis.roblox.com/groups/v1/groups/${GROUP_ID}`,
+      {
+        headers: {
+          "x-api-key": ROBLOX_API_KEY
+        }
+      }
+    );
+
+    const text = await response.text();
+    res.send(text);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error testing group");
+  }
 });
 
 // ===============================
