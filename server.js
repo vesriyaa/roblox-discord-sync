@@ -64,6 +64,23 @@ client.once("ready", async () => {
       .setName("getroles")
       .setDescription("Restore your team roles from Roblox")
   );
+
+  // 🔥 NEW GROUP ACCEPT COMMAND
+  await guild.commands.create(
+    new SlashCommandBuilder()
+      .setName("groupaccept")
+      .setDescription("Accept and rank a Roblox group member")
+      .addStringOption(option =>
+        option.setName("robloxid")
+          .setDescription("Roblox User ID")
+          .setRequired(true)
+      )
+      .addIntegerOption(option =>
+        option.setName("roleid")
+          .setDescription("Roblox Group Role ID")
+          .setRequired(true)
+      )
+  );
 });
 
 // ===============================
@@ -150,6 +167,59 @@ client.on("interactionCreate", async (interaction) => {
       ephemeral: true
     });
   }
+
+  // 🔥 GROUP ACCEPT
+  if (interaction.commandName === "groupaccept") {
+
+    if (!member.roles.cache.has(MOD_ROLE_ID)) {
+      return interaction.reply({
+        content: "❌ You do not have permission.",
+        ephemeral: true
+      });
+    }
+
+    const robloxId = interaction.options.getString("robloxid");
+    const roleId = interaction.options.getInteger("roleid");
+
+    try {
+
+      // Accept join request
+      await fetch(
+        `https://apis.roblox.com/groups/v1/groups/${GROUP_ID}/join-requests/users/${robloxId}`,
+        {
+          method: "POST",
+          headers: {
+            "x-api-key": ROBLOX_API_KEY
+          }
+        }
+      );
+
+      // Set role
+      await fetch(
+        `https://apis.roblox.com/groups/v1/groups/${GROUP_ID}/users/${robloxId}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": ROBLOX_API_KEY
+          },
+          body: JSON.stringify({ roleId })
+        }
+      );
+
+      return interaction.reply({
+        content: "✅ User accepted and ranked successfully.",
+        ephemeral: true
+      });
+
+    } catch (err) {
+      console.error("Group accept error:", err);
+      return interaction.reply({
+        content: "❌ Failed to update group.",
+        ephemeral: true
+      });
+    }
+  }
 });
 
 client.login(BOT_TOKEN);
@@ -176,11 +246,9 @@ app.post("/verify", async (req, res) => {
     const guild = await client.guilds.fetch(GUILD_ID);
     const member = await guild.members.fetch(discordId);
 
-    if (member.roles.cache.has(VERIFIED_ROLE_ID)) {
-      return res.status(400).send("Already verified");
+    if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
+      await member.roles.add(VERIFIED_ROLE_ID);
     }
-
-    await member.roles.add(VERIFIED_ROLE_ID);
 
     try {
       await member.send("✅ You have successfully verified your Roblox account!");
@@ -194,90 +262,6 @@ app.post("/verify", async (req, res) => {
 });
 
 // ===============================
-// TEAM ROLE SYNC (Roblox → Bot)
-// ===============================
-app.post("/updateRole", async (req, res) => {
-
-  if (req.headers["x-api-key"] !== API_KEY) {
-    return res.status(403).send("Unauthorized");
-  }
-
-  const { discordId, team } = req.body;
-  if (!discordId || !team) {
-    return res.status(400).send("Missing data");
-  }
-
-  try {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    const member = await guild.members.fetch(discordId);
-
-    const newRoleId = roleMap[team];
-    if (!newRoleId) {
-      return res.status(400).send("Invalid team");
-    }
-
-    for (const roleId of Object.values(roleMap)) {
-      if (member.roles.cache.has(roleId)) {
-        await member.roles.remove(roleId);
-      }
-    }
-
-    await member.roles.add(newRoleId);
-
-    res.send("Role updated");
-
-  } catch (err) {
-    console.error("Role update error:", err);
-    res.status(500).send("Error assigning role");
-  }
-});
-
-// ===============================
-// CHECK UNLINK (Roblox → Bot)
-// ===============================
-app.post("/checkUnlink", async (req, res) => {
-
-  if (req.headers["x-api-key"] !== API_KEY) {
-    return res.status(403).send("Unauthorized");
-  }
-
-  const { discordId } = req.body;
-  if (!discordId) {
-    return res.status(400).send("Missing discordId");
-  }
-
-  if (unlinkedUsers.has(discordId)) {
-    unlinkedUsers.delete(discordId);
-    return res.json({ unlinked: true });
-  }
-
-  res.json({ unlinked: false });
-});
-
-// ===============================
-// 🔥 TEST ROBLOX GROUP API
-// ===============================
-app.get("/testroles", async (req, res) => {
-  try {
-    const response = await fetch(
-      `https://apis.roblox.com/groups/v1/groups/${GROUP_ID}/roles`,
-      {
-        headers: {
-          "x-api-key": ROBLOX_API_KEY
-        }
-      }
-    );
-
-    const text = await response.text();
-    res.send(text);
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("Error testing roles");
-  }
-});
-
-// ===============================
 app.get("/", (req, res) => {
   res.send("Bot running");
 });
@@ -286,4 +270,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running");
 });
-
