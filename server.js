@@ -1,5 +1,5 @@
 const express = require("express");
-const { Client, GatewayIntentBits } = require("discord.js");
+const { Client, GatewayIntentBits, SlashCommandBuilder } = require("discord.js");
 
 const app = express();
 app.use(express.json());
@@ -22,11 +22,58 @@ const roleMap = {
   "Chasers": "1477828132269457559"
 };
 
-client.once("ready", () => {
+const verificationCodes = new Map(); 
+// code -> discordId
+
+client.once("ready", async () => {
   console.log("Bot is online");
+
+  // Register slash command
+  const guild = await client.guilds.fetch(GUILD_ID);
+
+  await guild.commands.create(
+    new SlashCommandBuilder()
+      .setName("verify")
+      .setDescription("Get a verification code for Roblox")
+  );
+});
+
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === "verify") {
+
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+
+    verificationCodes.set(code, interaction.user.id);
+
+    await interaction.reply({
+      content: `Your verification code is: **${code}**\nEnter this in Roblox.`,
+      ephemeral: true
+    });
+  }
 });
 
 client.login(BOT_TOKEN);
+
+app.post("/verify", (req, res) => {
+
+  if (req.headers["x-api-key"] !== API_KEY) {
+    return res.status(403).send("Unauthorized");
+  }
+
+  const { code } = req.body;
+
+  const discordId = verificationCodes.get(code);
+
+  if (!discordId) {
+    return res.status(400).send("Invalid code");
+  }
+
+  verificationCodes.delete(code);
+
+  res.json({ discordId });
+});
 
 app.post("/updateRole", async (req, res) => {
 
@@ -49,14 +96,12 @@ app.post("/updateRole", async (req, res) => {
       return res.status(400).send("Invalid team");
     }
 
-    // Remove old team roles
     for (const roleId of Object.values(roleMap)) {
       if (member.roles.cache.has(roleId)) {
         await member.roles.remove(roleId);
       }
     }
 
-    // Add new role
     await member.roles.add(newRoleId);
 
     res.send("Role updated");
