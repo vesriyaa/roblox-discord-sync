@@ -15,12 +15,15 @@ const client = new Client({
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
 const API_KEY = process.env.API_KEY;
-const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY;
 const GROUP_ID = process.env.GROUP_ID;
 
 // 🔹 ROLE IDS
 const VERIFIED_ROLE_ID = "1477834795512893520";
 const MOD_ROLE_ID = "1477872215801331763";
+
+// 🔹 DISCORD ROLE SWAP
+const OLD_DISCORD_ROLE = "1415902349192331381";
+const NEW_DISCORD_ROLE = "1415902349192331383";
 
 // 🔹 Team → Role mapping
 const roleMap = {
@@ -30,9 +33,9 @@ const roleMap = {
   "Chasers": "1477828132269457559"
 };
 
-// In-memory stores
 const verificationCodes = new Map();
 const unlinkedUsers = new Set();
+
 
 // ===============================
 // BOT READY
@@ -68,7 +71,18 @@ client.once("ready", async () => {
   await guild.commands.create(
     new SlashCommandBuilder()
       .setName("groupaccept")
-      .setDescription("Accept and rank a Roblox group member")
+      .setDescription("Accept a Roblox group join request")
+      .addStringOption(option =>
+        option.setName("robloxid")
+          .setDescription("Roblox User ID")
+          .setRequired(true)
+      )
+  );
+
+  await guild.commands.create(
+    new SlashCommandBuilder()
+      .setName("grouprank")
+      .setDescription("Change a Roblox member's group rank")
       .addStringOption(option =>
         option.setName("robloxid")
           .setDescription("Roblox User ID")
@@ -81,6 +95,7 @@ client.once("ready", async () => {
       )
   );
 });
+
 
 // ===============================
 // SLASH COMMAND HANDLER
@@ -113,7 +128,7 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   // ===============================
-  // UNLINK (MOD ONLY)
+  // UNLINK
   // ===============================
   if (interaction.commandName === "unlink") {
 
@@ -128,7 +143,6 @@ client.on("interactionCreate", async (interaction) => {
     const targetMember = await guild.members.fetch(targetUser.id);
 
     try {
-
       if (targetMember.roles.cache.has(VERIFIED_ROLE_ID)) {
         await targetMember.roles.remove(VERIFIED_ROLE_ID);
       }
@@ -156,122 +170,137 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   // ===============================
-  // GET ROLES
-  // ===============================
-  if (interaction.commandName === "getroles") {
-
-    if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
-      return interaction.reply({
-        content: "❌ You must be verified first.",
-        ephemeral: true
-      });
-    }
-
-    return interaction.reply({
-      content: "✅ Your roles will sync automatically when you rejoin Roblox.",
-      ephemeral: true
-    });
-  }
-
-  // ===============================
   // GROUP ACCEPT
   // ===============================
-if (interaction.commandName === "groupaccept") {
+  if (interaction.commandName === "groupaccept") {
 
-  if (!member.roles.cache.has(MOD_ROLE_ID)) {
-    return interaction.reply({
-      content: "❌ You do not have permission.",
-      ephemeral: true
-    });
-  }
-
-  const robloxId = interaction.options.getString("robloxid");
-  const roleId = interaction.options.getInteger("roleid");
-
-  try {
-
-    // Step 1: Get X-CSRF-TOKEN
-    const csrfResponse = await fetch("https://auth.roblox.com/v2/logout", {
-      method: "POST",
-      headers: {
-        "Cookie": `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`
-      }
-    });
-
-    const csrfToken = csrfResponse.headers.get("x-csrf-token");
-
-    if (!csrfToken) {
+    if (!member.roles.cache.has(MOD_ROLE_ID)) {
       return interaction.reply({
-        content: "❌ Failed to get CSRF token.",
+        content: "❌ You do not have permission.",
         ephemeral: true
       });
     }
 
-    // Step 2: Accept join request
-    const acceptResponse = await fetch(
-      `https://groups.roblox.com/v1/groups/${GROUP_ID}/join-requests/users/${robloxId}`,
-      {
+    const robloxId = interaction.options.getString("robloxid");
+
+    try {
+
+      const csrfResponse = await fetch("https://auth.roblox.com/v2/logout", {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          "Cookie": `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
-          "x-csrf-token": csrfToken
+          "Cookie": `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`
         }
-      }
-    );
+      });
 
-    if (!acceptResponse.ok) {
-      const errorText = await acceptResponse.text();
+      const csrfToken = csrfResponse.headers.get("x-csrf-token");
+
+      const acceptResponse = await fetch(
+        `https://groups.roblox.com/v1/groups/${GROUP_ID}/join-requests/users/${robloxId}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Cookie": `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
+            "x-csrf-token": csrfToken
+          }
+        }
+      );
+
+      if (!acceptResponse.ok) {
+        const errorText = await acceptResponse.text();
+        return interaction.reply({
+          content: `❌ Accept failed:\n${errorText}`,
+          ephemeral: true
+        });
+      }
+
+      // 🔹 Discord role swap
+      if (member.roles.cache.has(OLD_DISCORD_ROLE)) {
+        await member.roles.remove(OLD_DISCORD_ROLE);
+      }
+
+      await member.roles.add(NEW_DISCORD_ROLE);
+
       return interaction.reply({
-        content: `❌ Accept failed:\n${errorText}`,
+        content: "✅ User accepted and Discord role updated.",
+        ephemeral: true
+      });
+
+    } catch (err) {
+      console.error("Accept error:", err);
+      return interaction.reply({
+        content: "❌ Unexpected error occurred.",
         ephemeral: true
       });
     }
-
-    // Step 3: Set role
-    const roleResponse = await fetch(
-      `https://groups.roblox.com/v1/groups/${GROUP_ID}/users/${robloxId}`,
-      {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          "Cookie": `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
-          "x-csrf-token": csrfToken
-        },
-        body: JSON.stringify({ roleId })
-      }
-    );
-
-    if (!roleResponse.ok) {
-      const errorText = await roleResponse.text();
-      return interaction.reply({
-        content: `❌ Role update failed:\n${errorText}`,
-        ephemeral: true
-      });
-    }
-
-    return interaction.reply({
-      content: "✅ User accepted and ranked successfully.",
-      ephemeral: true
-    });
-
-  } catch (err) {
-    console.error("Legacy group accept error:", err);
-    return interaction.reply({
-      content: "❌ Unexpected error occurred.",
-      ephemeral: true
-    });
   }
-}
+
+  // ===============================
+  // GROUP RANK
+  // ===============================
+  if (interaction.commandName === "grouprank") {
+
+    if (!member.roles.cache.has(MOD_ROLE_ID)) {
+      return interaction.reply({
+        content: "❌ You do not have permission.",
+        ephemeral: true
+      });
+    }
+
+    const robloxId = interaction.options.getString("robloxid");
+    const roleId = interaction.options.getInteger("roleid");
+
+    try {
+
+      const csrfResponse = await fetch("https://auth.roblox.com/v2/logout", {
+        method: "POST",
+        headers: {
+          "Cookie": `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`
+        }
+      });
+
+      const csrfToken = csrfResponse.headers.get("x-csrf-token");
+
+      const roleResponse = await fetch(
+        `https://groups.roblox.com/v1/groups/${GROUP_ID}/users/${robloxId}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "Cookie": `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
+            "x-csrf-token": csrfToken
+          },
+          body: JSON.stringify({ roleId })
+        }
+      );
+
+      if (!roleResponse.ok) {
+        const errorText = await roleResponse.text();
+        return interaction.reply({
+          content: `❌ Rank change failed:\n${errorText}`,
+          ephemeral: true
+        });
+      }
+
+      return interaction.reply({
+        content: "✅ User rank updated successfully.",
+        ephemeral: true
+      });
+
+    } catch (err) {
+      console.error("Rank error:", err);
+      return interaction.reply({
+        content: "❌ Unexpected error occurred.",
+        ephemeral: true
+      });
+    }
+  }
+
 });
 
-// ===============================
-// LOGIN
-// ===============================
-client.login(BOT_TOKEN);
 
 // ===============================
-// VERIFY ENDPOINT (Roblox → Bot)
+// VERIFY ENDPOINT
 // ===============================
 app.post("/verify", async (req, res) => {
 
@@ -292,11 +321,9 @@ app.post("/verify", async (req, res) => {
     const guild = await client.guilds.fetch(GUILD_ID);
     const member = await guild.members.fetch(discordId);
 
-    if (member.roles.cache.has(VERIFIED_ROLE_ID)) {
-      return res.status(400).send("Already verified");
+    if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
+      await member.roles.add(VERIFIED_ROLE_ID);
     }
-
-    await member.roles.add(VERIFIED_ROLE_ID);
 
     try {
       await member.send("✅ You have successfully verified your Roblox account!");
@@ -309,68 +336,10 @@ app.post("/verify", async (req, res) => {
   res.json({ discordId });
 });
 
-// ===============================
-// TEAM ROLE SYNC
-// ===============================
-app.post("/updateRole", async (req, res) => {
-
-  if (req.headers["x-api-key"] !== API_KEY) {
-    return res.status(403).send("Unauthorized");
-  }
-
-  const { discordId, team } = req.body;
-  if (!discordId || !team) {
-    return res.status(400).send("Missing data");
-  }
-
-  try {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    const member = await guild.members.fetch(discordId);
-
-    const newRoleId = roleMap[team];
-    if (!newRoleId) {
-      return res.status(400).send("Invalid team");
-    }
-
-    for (const roleId of Object.values(roleMap)) {
-      if (member.roles.cache.has(roleId)) {
-        await member.roles.remove(roleId);
-      }
-    }
-
-    await member.roles.add(newRoleId);
-
-    res.send("Role updated");
-
-  } catch (err) {
-    console.error("Role update error:", err);
-    res.status(500).send("Error assigning role");
-  }
-});
 
 // ===============================
-// CHECK UNLINK
-// ===============================
-app.post("/checkUnlink", async (req, res) => {
+client.login(BOT_TOKEN);
 
-  if (req.headers["x-api-key"] !== API_KEY) {
-    return res.status(403).send("Unauthorized");
-  }
-
-  const { discordId } = req.body;
-  if (!discordId) {
-    return res.status(400).send("Missing discordId");
-  }
-
-  if (unlinkedUsers.has(discordId)) {
-    unlinkedUsers.delete(discordId);
-    return res.json({ unlinked: true });
-  }
-
-  res.json({ unlinked: false });
-});
-
-// ===============================
 app.get("/", (req, res) => {
   res.send("Bot running");
 });
@@ -379,8 +348,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running");
 });
-
-
-
-
-
