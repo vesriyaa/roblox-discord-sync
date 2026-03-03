@@ -176,7 +176,7 @@ client.on("interactionCreate", async (interaction) => {
   // ===============================
   // GROUP ACCEPT
   // ===============================
- if (interaction.commandName === "groupaccept") {
+if (interaction.commandName === "groupaccept") {
 
   if (!member.roles.cache.has(MOD_ROLE_ID)) {
     return interaction.reply({
@@ -190,13 +190,32 @@ client.on("interactionCreate", async (interaction) => {
 
   try {
 
-    // ✅ Correct Open Cloud endpoint
+    // Step 1: Get X-CSRF-TOKEN
+    const csrfResponse = await fetch("https://auth.roblox.com/v2/logout", {
+      method: "POST",
+      headers: {
+        "Cookie": `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`
+      }
+    });
+
+    const csrfToken = csrfResponse.headers.get("x-csrf-token");
+
+    if (!csrfToken) {
+      return interaction.reply({
+        content: "❌ Failed to get CSRF token.",
+        ephemeral: true
+      });
+    }
+
+    // Step 2: Accept join request
     const acceptResponse = await fetch(
-      `https://apis.roblox.com/cloud/v2/groups/${GROUP_ID}/joinRequests/${robloxId}`,
+      `https://groups.roblox.com/v1/groups/${GROUP_ID}/join-requests/users/${robloxId}`,
       {
         method: "POST",
         headers: {
-          "x-api-key": ROBLOX_API_KEY
+          "Content-Type": "application/json",
+          "Cookie": `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
+          "x-csrf-token": csrfToken
         }
       }
     );
@@ -209,14 +228,15 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // Role update (this endpoint is correct)
+    // Step 3: Set role
     const roleResponse = await fetch(
-      `https://apis.roblox.com/groups/v1/groups/${GROUP_ID}/users/${robloxId}`,
+      `https://groups.roblox.com/v1/groups/${GROUP_ID}/users/${robloxId}`,
       {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          "x-api-key": ROBLOX_API_KEY
+          "Cookie": `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
+          "x-csrf-token": csrfToken
         },
         body: JSON.stringify({ roleId })
       }
@@ -236,13 +256,12 @@ client.on("interactionCreate", async (interaction) => {
     });
 
   } catch (err) {
-    console.error("Group accept error:", err);
+    console.error("Legacy group accept error:", err);
     return interaction.reply({
       content: "❌ Unexpected error occurred.",
       ephemeral: true
     });
   }
- }
 });
 
 // ===============================
@@ -359,6 +378,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running");
 });
+
 
 
 
