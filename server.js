@@ -191,7 +191,7 @@ client.on("interactionCreate", async (interaction) => {
     try {
 
       const acceptResponse = await fetch(
-        `https://apis.roblox.com/groups/v1/groups/${GROUP_ID}/join-requests/users/${robloxId}`,
+        `https://apis.roblox.com/clouds/v2/groups/${GROUP_ID}/join-requests/users/${robloxId}`,
         {
           method: "POST",
           headers: {
@@ -357,3 +357,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running");
 });
+
