@@ -348,6 +348,44 @@ app.post("/checkUnlink", async (req, res) => {
   res.json({ unlinked: false });
 });
 
+app.post("/updateRole", async (req, res) => {
+
+  if (req.headers["x-api-key"] !== API_KEY) {
+    return res.status(403).send("Unauthorized");
+  }
+
+  const { discordId, team } = req.body;
+  if (!discordId || !team) {
+    return res.status(400).send("Missing data");
+  }
+
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const member = await guild.members.fetch(discordId);
+
+    const newRoleId = roleMap[team];
+    if (!newRoleId) {
+      return res.status(400).send("Invalid team");
+    }
+
+    // Remove existing team roles
+    for (const roleId of Object.values(roleMap)) {
+      if (member.roles.cache.has(roleId)) {
+        await member.roles.remove(roleId);
+      }
+    }
+
+    // Add correct role
+    await member.roles.add(newRoleId);
+
+    res.send("Role updated");
+
+  } catch (err) {
+    console.error("Role update error:", err);
+    res.status(500).send("Error assigning role");
+  }
+});
+
 // ===============================
 client.login(BOT_TOKEN);
 
@@ -359,5 +397,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running");
 });
+
 
 
