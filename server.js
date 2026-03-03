@@ -176,70 +176,71 @@ client.on("interactionCreate", async (interaction) => {
   // ===============================
   // GROUP ACCEPT
   // ===============================
-  if (interaction.commandName === "groupaccept") {
+ if (interaction.commandName === "groupaccept") {
 
-    if (!member.roles.cache.has(MOD_ROLE_ID)) {
+  if (!member.roles.cache.has(MOD_ROLE_ID)) {
+    return interaction.reply({
+      content: "❌ You do not have permission.",
+      ephemeral: true
+    });
+  }
+
+  const robloxId = interaction.options.getString("robloxid");
+  const roleId = interaction.options.getInteger("roleid");
+
+  try {
+
+    // ✅ Correct Open Cloud endpoint
+    const acceptResponse = await fetch(
+      `https://apis.roblox.com/cloud/v2/groups/${GROUP_ID}/joinRequests/${robloxId}`,
+      {
+        method: "POST",
+        headers: {
+          "x-api-key": ROBLOX_API_KEY
+        }
+      }
+    );
+
+    if (!acceptResponse.ok) {
+      const errorText = await acceptResponse.text();
       return interaction.reply({
-        content: "❌ You do not have permission.",
+        content: `❌ Accept failed:\n${errorText}`,
         ephemeral: true
       });
     }
 
-    const robloxId = interaction.options.getString("robloxid");
-    const roleId = interaction.options.getInteger("roleid");
-
-    try {
-
-      const acceptResponse = await fetch(
-        `https://apis.roblox.com/clouds/v2/groups/${GROUP_ID}/join-requests/users/${robloxId}`,
-        {
-          method: "POST",
-          headers: {
-            "x-api-key": ROBLOX_API_KEY
-          }
-        }
-      );
-
-      if (!acceptResponse.ok) {
-        const errorText = await acceptResponse.text();
-        return interaction.reply({
-          content: `❌ Accept failed:\n${errorText}`,
-          ephemeral: true
-        });
+    // Role update (this endpoint is correct)
+    const roleResponse = await fetch(
+      `https://apis.roblox.com/groups/v1/groups/${GROUP_ID}/users/${robloxId}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": ROBLOX_API_KEY
+        },
+        body: JSON.stringify({ roleId })
       }
+    );
 
-      const roleResponse = await fetch(
-        `https://apis.roblox.com/groups/v1/groups/${GROUP_ID}/users/${robloxId}`,
-        {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": ROBLOX_API_KEY
-          },
-          body: JSON.stringify({ roleId })
-        }
-      );
-
-      if (!roleResponse.ok) {
-        const errorText = await roleResponse.text();
-        return interaction.reply({
-          content: `❌ Role update failed:\n${errorText}`,
-          ephemeral: true
-        });
-      }
-
+    if (!roleResponse.ok) {
+      const errorText = await roleResponse.text();
       return interaction.reply({
-        content: "✅ User accepted and ranked successfully.",
-        ephemeral: true
-      });
-
-    } catch (err) {
-      console.error("Group accept error:", err);
-      return interaction.reply({
-        content: "❌ Unexpected error occurred.",
+        content: `❌ Role update failed:\n${errorText}`,
         ephemeral: true
       });
     }
+
+    return interaction.reply({
+      content: "✅ User accepted and ranked successfully.",
+      ephemeral: true
+    });
+
+  } catch (err) {
+    console.error("Group accept error:", err);
+    return interaction.reply({
+      content: "❌ Unexpected error occurred.",
+      ephemeral: true
+    });
   }
 });
 
@@ -357,4 +358,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running");
 });
+
 
