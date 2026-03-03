@@ -214,13 +214,6 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      // 🔹 Discord role swap
-      if (member.roles.cache.has(OLD_DISCORD_ROLE)) {
-        await member.roles.remove(OLD_DISCORD_ROLE);
-      }
-
-      await member.roles.add(NEW_DISCORD_ROLE);
-
       return interaction.reply({
         content: "✅ User accepted and Discord role updated.",
         ephemeral: true
@@ -348,3 +341,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running");
 });
+
