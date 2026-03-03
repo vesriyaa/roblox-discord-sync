@@ -329,6 +329,24 @@ app.post("/verify", async (req, res) => {
   res.json({ discordId });
 });
 
+app.post("/checkUnlink", async (req, res) => {
+
+  if (req.headers["x-api-key"] !== API_KEY) {
+    return res.status(403).send("Unauthorized");
+  }
+
+  const { discordId } = req.body;
+  if (!discordId) {
+    return res.status(400).send("Missing discordId");
+  }
+
+  if (unlinkedUsers.has(discordId)) {
+    unlinkedUsers.delete(discordId);
+    return res.json({ unlinked: true });
+  }
+
+  res.json({ unlinked: false });
+});
 
 // ===============================
 client.login(BOT_TOKEN);
@@ -341,4 +359,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running");
 });
+
 
