@@ -34,6 +34,7 @@ const ENVISIONED_ROLE_ID = "1415902349192331383";
 const WIPE_CHANNEL_ID = "1492143731921387520";
 const DEATH_CHANNEL_ID = "1415902351985872908";
 const BOT_TRANSCRIPTS_CHANNEL_ID = "1493921133605683322";
+const EVENT_LOGS_CHANNEL_ID = "1493925383706513419";
 
 // 🔹 Team → Role mapping
 const roleMap = {
@@ -49,9 +50,12 @@ const adminActions = new Map();
 const adminActionOrder = [];
 const adminActionDedupe = new Map();
 const adminActionWaiters = new Map();
+const eventSessions = new Map();
+const eventSessionOrder = [];
 const ADMIN_ACTION_WAIT_TIMEOUT_MS = 15000;
 const ADMIN_ACTION_CLAIM_TIMEOUT_MS = 60000;
 const ADMIN_ACTION_RETENTION_MS = 30 * 60 * 1000;
+const EVENT_SESSION_RETENTION_LIMIT = 250;
 
 async function resolveDiscordMember(guild, input) {
   const rawInput = input.trim();
@@ -134,6 +138,208 @@ function buildRelayMessagePayload(body) {
   }
 
   return messagePayload;
+}
+
+function formatOptionalString(value, fallback = "") {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const trimmedValue = value.trim();
+  return trimmedValue.length > 0 ? trimmedValue : fallback;
+}
+
+function parsePositiveInteger(value) {
+  const parsedValue = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : null;
+}
+
+function parseTimestamp(value) {
+  const parsedValue = Number(value);
+  return Number.isFinite(parsedValue) && parsedValue > 0 ? Math.floor(parsedValue) : null;
+}
+
+function normalizeEventResources(resources, existingResources = {}) {
+  const normalizeValue = (value, fallback = 0) => {
+    const parsedValue = Number.parseInt(String(value ?? fallback), 10);
+    return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : 0;
+  };
+
+  return {
+    gasUsed: normalizeValue(resources?.gasUsed, existingResources.gasUsed),
+    bladesUsed: normalizeValue(resources?.bladesUsed, existingResources.bladesUsed),
+    bandagesUsed: normalizeValue(resources?.bandagesUsed, existingResources.bandagesUsed),
+  };
+}
+
+function normalizeEventParticipant(participant) {
+  const userId = parsePositiveInteger(participant?.userId);
+  if (!userId) {
+    return null;
+  }
+
+  const playerName = formatOptionalString(participant?.playerName, String(userId));
+  const displayName = formatOptionalString(participant?.displayName, playerName);
+  const loreName = formatOptionalString(participant?.loreName, playerName);
+  const teamName = formatOptionalString(participant?.teamName, "Unknown");
+  const updatedAt = parseTimestamp(participant?.updatedAt) ?? parseTimestamp(participant?.deathRecordedAt) ?? Date.now();
+
+  return {
+    userId,
+    playerName,
+    displayName,
+    loreName,
+    teamName,
+    status: formatOptionalString(participant?.status).toLowerCase() === "injury" ? "injury" : "death",
+    deathRecordedAt: parseTimestamp(participant?.deathRecordedAt) ?? updatedAt,
+    updatedAt,
+    restoredAt: parseTimestamp(participant?.restoredAt),
+    restoreAction: formatOptionalString(participant?.restoreAction),
+    moderatorName: formatOptionalString(participant?.moderatorName),
+    moderatorUserId: parsePositiveInteger(participant?.moderatorUserId),
+    snapshotId: formatOptionalString(participant?.snapshotId),
+  };
+}
+
+function normalizeEventParticipants(participants, existingParticipants = []) {
+  const sourceParticipants = Array.isArray(participants) ? participants : existingParticipants;
+  const normalizedParticipants = sourceParticipants
+    .map(normalizeEventParticipant)
+    .filter(Boolean);
+
+  normalizedParticipants.sort((left, right) => {
+    if (left.deathRecordedAt !== right.deathRecordedAt) {
+      return left.deathRecordedAt - right.deathRecordedAt;
+    }
+
+    return left.loreName.localeCompare(right.loreName);
+  });
+
+  return normalizedParticipants;
+}
+
+function trackEventSessionOrder(eventId) {
+  const existingIndex = eventSessionOrder.indexOf(eventId);
+  if (existingIndex >= 0) {
+    eventSessionOrder.splice(existingIndex, 1);
+  }
+
+  eventSessionOrder.push(eventId);
+  while (eventSessionOrder.length > EVENT_SESSION_RETENTION_LIMIT) {
+    const oldestEventId = eventSessionOrder.shift();
+    if (oldestEventId) {
+      eventSessions.delete(oldestEventId);
+    }
+  }
+}
+
+function upsertEventSession(payload) {
+  const eventId = formatOptionalString(payload?.eventId);
+  if (!eventId) {
+    return null;
+  }
+
+  const existingSession = eventSessions.get(eventId);
+  const incomingUpdatedAt = parseTimestamp(payload?.updatedAt);
+  if (existingSession && incomingUpdatedAt && incomingUpdatedAt < existingSession.updatedAt) {
+    return existingSession;
+  }
+
+  const session = {
+    eventId,
+    mapName: formatOptionalString(payload?.mapName, existingSession?.mapName || "Unknown Map"),
+    active: payload?.active === true,
+    startedAt: parseTimestamp(payload?.startedAt) ?? existingSession?.startedAt ?? Date.now(),
+    endedAt: payload?.active === true
+      ? null
+      : parseTimestamp(payload?.endedAt) ?? existingSession?.endedAt ?? Date.now(),
+    updatedAt: incomingUpdatedAt ?? Date.now(),
+    resources: normalizeEventResources(payload?.resources, existingSession?.resources),
+    participants: normalizeEventParticipants(payload?.participants ?? payload?.entries ?? payload?.deaths, existingSession?.participants),
+    postedSummary: existingSession?.postedSummary || null,
+  };
+
+  eventSessions.set(eventId, session);
+  trackEventSessionOrder(eventId);
+  return session;
+}
+
+function buildEventSummarySection(participants, status) {
+  const filteredParticipants = participants.filter((participant) => participant.status === status);
+  if (filteredParticipants.length === 0) {
+    return ["*None!*"];
+  }
+
+  return filteredParticipants.map((participant) => `*${participant.loreName} | ${participant.teamName}*`);
+}
+
+function buildEventSummaryMessage(session) {
+  const introLine = session.active
+    ? `*An event is active in: **${session.mapName}***`
+    : `*An event has ended in: **${session.mapName}***`;
+
+  return [
+    introLine,
+    "",
+    "**DEATHS:**",
+    ...buildEventSummarySection(session.participants, "death"),
+    "",
+    "**INJURIES:**",
+    ...buildEventSummarySection(session.participants, "injury"),
+    "",
+    `*Gas Used: ${session.resources.gasUsed}*`,
+    `*Blades Used: ${session.resources.bladesUsed}*`,
+    `*Bandages Used: ${session.resources.bandagesUsed}*`,
+  ].join("\n");
+}
+
+function buildDiscordMessageUrl(channelId, messageId) {
+  if (!channelId || !messageId) {
+    return null;
+  }
+
+  return `https://discord.com/channels/${GUILD_ID}/${channelId}/${messageId}`;
+}
+
+async function postEventSummary(session) {
+  const channel = await client.channels.fetch(EVENT_LOGS_CHANNEL_ID);
+  if (!channel || typeof channel.send !== "function") {
+    throw new Error("Event logs channel unavailable");
+  }
+
+  const message = await channel.send({
+    content: buildEventSummaryMessage(session),
+  });
+
+  session.postedSummary = {
+    channelId: channel.id,
+    messageId: message.id,
+    postedAt: Date.now(),
+  };
+
+  return message;
+}
+
+async function refreshEventSummary(session) {
+  const postedSummary = session.postedSummary;
+  if (!postedSummary?.channelId || !postedSummary?.messageId) {
+    return postEventSummary(session);
+  }
+
+  const channel = await client.channels.fetch(postedSummary.channelId);
+  if (!channel?.messages?.fetch) {
+    return postEventSummary(session);
+  }
+
+  try {
+    const message = await channel.messages.fetch(postedSummary.messageId);
+    await message.edit({
+      content: buildEventSummaryMessage(session),
+    });
+    return message;
+  } catch {
+    return postEventSummary(session);
+  }
 }
 
 function hasModPermissions(member) {
@@ -564,6 +770,40 @@ async function handleQueuedAdminAction(interaction, actionData) {
   return interaction.editReply(`Queued ${getAdminActionDescription(record)}. I will post the result once Studio processes it.`);
 }
 
+async function handleEventSummaryCommand(interaction, mode, member) {
+  if (!hasModPermissions(member)) {
+    return interaction.reply({
+      content: "❌ You do not have permission.",
+      ephemeral: true,
+    });
+  }
+
+  const eventId = formatOptionalString(interaction.options.getString("eventid"));
+  const session = eventSessions.get(eventId);
+  if (!session) {
+    return interaction.reply({
+      content: "❌ That event ID was not found in the bot cache yet.",
+      ephemeral: true,
+    });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    const message = mode === "refresh"
+      ? await refreshEventSummary(session)
+      : await postEventSummary(session);
+    const messageUrl = buildDiscordMessageUrl(message.channelId, message.id);
+    const actionLabel = mode === "refresh" ? "Refreshed" : "Posted";
+    return interaction.editReply(messageUrl
+      ? `${actionLabel} event ${eventId}: ${messageUrl}`
+      : `${actionLabel} event ${eventId}.`);
+  } catch (err) {
+    console.error("Event summary command error:", err);
+    return interaction.editReply("❌ Failed to post that event summary.");
+  }
+}
+
 
 // ===============================
 // BOT READY
@@ -652,6 +892,28 @@ client.once("ready", async () => {
         option.setName("snapshot")
           .setDescription("Snapshot ID or latest")
           .setRequired(false)
+      )
+  );
+
+  await guild.commands.create(
+    new SlashCommandBuilder()
+      .setName("postevent")
+      .setDescription("Post an event summary to the event logs channel")
+      .addStringOption(option =>
+        option.setName("eventid")
+          .setDescription("Event ID from Studio")
+          .setRequired(true)
+      )
+  );
+
+  await guild.commands.create(
+    new SlashCommandBuilder()
+      .setName("refreshevent")
+      .setDescription("Refresh a previously posted event summary")
+      .addStringOption(option =>
+        option.setName("eventid")
+          .setDescription("Event ID from Studio")
+          .setRequired(true)
       )
   );
 
@@ -910,6 +1172,20 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   // ===============================
+  // POST EVENT
+  // ===============================
+  if (interaction.commandName === "postevent") {
+    return handleEventSummaryCommand(interaction, "post", member);
+  }
+
+  // ===============================
+  // REFRESH EVENT
+  // ===============================
+  if (interaction.commandName === "refreshevent") {
+    return handleEventSummaryCommand(interaction, "refresh", member);
+  }
+
+  // ===============================
   // GROUP RANK
   // ===============================
   if (interaction.commandName === "grouprank") {
@@ -1098,6 +1374,25 @@ app.post("/relayWebhook/:service", async (req, res) => {
     console.error("Relay webhook error:", err);
     res.status(500).send("Error posting relay webhook");
   }
+});
+
+app.post("/eventSessions/sync", (req, res) => {
+
+  if (req.headers["x-api-key"] !== API_KEY) {
+    return res.status(403).send("Unauthorized");
+  }
+
+  const session = upsertEventSession(req.body || {});
+  if (!session) {
+    return res.status(400).send("Missing event session payload");
+  }
+
+  res.json({
+    ok: true,
+    eventId: session.eventId,
+    active: session.active,
+    participants: session.participants.length,
+  });
 });
 
 app.post("/adminActions/claim", (req, res) => {
