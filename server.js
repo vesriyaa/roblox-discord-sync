@@ -22,8 +22,8 @@ const VERIFIED_ROLE_ID = "1477834795512893520";
 const MOD_ROLE_ID = "1477872215801331763";
 
 // 🔹 DISCORD ROLE SWAP
-const OLD_DISCORD_ROLE = "1415902349192331381";
-const NEW_DISCORD_ROLE = "1415902349192331383";
+const WALD_ROLE_ID = "1415902349192331381";
+const ENVISIONED_ROLE_ID = "1415902349192331383";
 
 // 🔹 Team → Role mapping
 const roleMap = {
@@ -35,6 +35,46 @@ const roleMap = {
 
 const verificationCodes = new Map();
 const unlinkedUsers = new Set();
+
+async function resolveDiscordMember(guild, input) {
+  const rawInput = input.trim();
+  const mentionMatch = rawInput.match(/^<@!?(\d+)>$/);
+  const discordId = mentionMatch?.[1] ?? (/^\d+$/.test(rawInput) ? rawInput : null);
+
+  if (discordId) {
+    try {
+      return await guild.members.fetch(discordId);
+    } catch {
+      return null;
+    }
+  }
+
+  const normalizedInput = rawInput.replace(/^@/, "").toLowerCase();
+  const members = await guild.members.fetch();
+
+  return members.find((guildMember) => {
+    const { user, displayName } = guildMember;
+    const tag = user.discriminator === "0"
+      ? user.username
+      : `${user.username}#${user.discriminator}`;
+
+    return user.username.toLowerCase() === normalizedInput
+      || user.tag.toLowerCase() === normalizedInput
+      || tag.toLowerCase() === normalizedInput
+      || user.globalName?.toLowerCase() === normalizedInput
+      || displayName?.toLowerCase() === normalizedInput;
+  }) ?? null;
+}
+
+async function updateGroupAcceptRoles(member) {
+  if (member.roles.cache.has(WALD_ROLE_ID)) {
+    await member.roles.remove(WALD_ROLE_ID);
+  }
+
+  if (!member.roles.cache.has(ENVISIONED_ROLE_ID)) {
+    await member.roles.add(ENVISIONED_ROLE_ID);
+  }
+}
 
 
 // ===============================
@@ -75,6 +115,11 @@ client.once("ready", async () => {
       .addStringOption(option =>
         option.setName("robloxid")
           .setDescription("Roblox User ID")
+          .setRequired(true)
+      )
+      .addStringOption(option =>
+        option.setName("discorduser")
+          .setDescription("Discord @username, mention, or user ID")
           .setRequired(true)
       )
   );
@@ -182,6 +227,15 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     const robloxId = interaction.options.getString("robloxid");
+    const discordUserInput = interaction.options.getString("discorduser");
+    const targetMember = await resolveDiscordMember(guild, discordUserInput);
+
+    if (!targetMember) {
+      return interaction.reply({
+        content: "Could not find that Discord user.",
+        ephemeral: true
+      });
+    }
 
     try {
 
@@ -214,8 +268,18 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
+      try {
+        await updateGroupAcceptRoles(targetMember);
+      } catch (roleError) {
+        console.error("Group accept role update error:", roleError);
+        return interaction.reply({
+          content: `User accepted, but Discord roles could not be updated for ${targetMember.user.tag}.`,
+          ephemeral: true
+        });
+      }
+
       return interaction.reply({
-        content: "✅ User accepted and Discord role updated.",
+        content: `User accepted. Envisioned was applied and Wald was removed for ${targetMember.user.tag}.`,
         ephemeral: true
       });
 
