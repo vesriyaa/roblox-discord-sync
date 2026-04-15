@@ -266,13 +266,28 @@ function upsertEventSession(payload) {
   return session;
 }
 
-function buildEventSummarySection(participants, status) {
-  const filteredParticipants = participants.filter((participant) => participant.status === status);
+function formatEventParticipantLine(participant, strikeThrough = false) {
+  const baseLine = `${participant.loreName} | ${participant.teamName}`;
+  return strikeThrough ? `*~~${baseLine}~~*` : `*${baseLine}*`;
+}
+
+function buildEventDeathsSection(participants) {
+  if (participants.length === 0) {
+    return ["*None!*"];
+  }
+
+  return participants.map((participant) =>
+    formatEventParticipantLine(participant, participant.status === "injury")
+  );
+}
+
+function buildEventInjuriesSection(participants) {
+  const filteredParticipants = participants.filter((participant) => participant.status === "injury");
   if (filteredParticipants.length === 0) {
     return ["*None!*"];
   }
 
-  return filteredParticipants.map((participant) => `*${participant.loreName} | ${participant.teamName}*`);
+  return filteredParticipants.map((participant) => formatEventParticipantLine(participant));
 }
 
 function buildEventSummaryMessage(session) {
@@ -284,10 +299,10 @@ function buildEventSummaryMessage(session) {
     introLine,
     "",
     "**DEATHS:**",
-    ...buildEventSummarySection(session.participants, "death"),
+    ...buildEventDeathsSection(session.participants),
     "",
     "**INJURIES:**",
-    ...buildEventSummarySection(session.participants, "injury"),
+    ...buildEventInjuriesSection(session.participants),
     "",
     `*Gas Used: ${session.resources.gasUsed}*`,
     `*Blades Used: ${session.resources.bladesUsed}*`,
