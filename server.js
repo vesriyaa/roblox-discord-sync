@@ -76,6 +76,17 @@ async function updateGroupAcceptRoles(member) {
   }
 }
 
+function sendInteractionResponse(interaction, content) {
+  if (interaction.deferred || interaction.replied) {
+    return interaction.editReply({ content });
+  }
+
+  return interaction.reply({
+    content,
+    ephemeral: true
+  });
+}
+
 
 // ===============================
 // BOT READY
@@ -188,6 +199,8 @@ client.on("interactionCreate", async (interaction) => {
     const targetMember = await guild.members.fetch(targetUser.id);
 
     try {
+      await interaction.deferReply({ ephemeral: true });
+
       if (targetMember.roles.cache.has(VERIFIED_ROLE_ID)) {
         await targetMember.roles.remove(VERIFIED_ROLE_ID);
       }
@@ -200,17 +213,11 @@ client.on("interactionCreate", async (interaction) => {
 
       unlinkedUsers.add(targetUser.id);
 
-      return interaction.reply({
-        content: `✅ Successfully unlinked ${targetUser.tag}`,
-        ephemeral: true
-      });
+      return sendInteractionResponse(interaction, `✅ Successfully unlinked ${targetUser.tag}`);
 
     } catch (err) {
       console.error("Unlink error:", err);
-      return interaction.reply({
-        content: "❌ Failed to unlink user.",
-        ephemeral: true
-      });
+      return sendInteractionResponse(interaction, "❌ Failed to unlink user.");
     }
   }
 
@@ -238,6 +245,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     try {
+      await interaction.deferReply({ ephemeral: true });
 
       const csrfResponse = await fetch("https://auth.roblox.com/v2/logout", {
         method: "POST",
@@ -262,33 +270,21 @@ client.on("interactionCreate", async (interaction) => {
 
       if (!acceptResponse.ok) {
         const errorText = await acceptResponse.text();
-        return interaction.reply({
-          content: `❌ Accept failed:\n${errorText}`,
-          ephemeral: true
-        });
+        return sendInteractionResponse(interaction, `❌ Accept failed:\n${errorText}`);
       }
 
       try {
         await updateGroupAcceptRoles(targetMember);
       } catch (roleError) {
         console.error("Group accept role update error:", roleError);
-        return interaction.reply({
-          content: `User accepted, but Discord roles could not be updated for ${targetMember.user.tag}.`,
-          ephemeral: true
-        });
+        return sendInteractionResponse(interaction, `User accepted, but Discord roles could not be updated for ${targetMember.user.tag}.`);
       }
 
-      return interaction.reply({
-        content: `User accepted. Envisioned was applied and Wald was removed for ${targetMember.user.tag}.`,
-        ephemeral: true
-      });
+      return sendInteractionResponse(interaction, `User accepted. Envisioned was applied and Wald was removed for ${targetMember.user.tag}.`);
 
     } catch (err) {
       console.error("Accept error:", err);
-      return interaction.reply({
-        content: "❌ Unexpected error occurred.",
-        ephemeral: true
-      });
+      return sendInteractionResponse(interaction, "❌ Unexpected error occurred.");
     }
   }
 
@@ -308,6 +304,7 @@ client.on("interactionCreate", async (interaction) => {
     const roleId = interaction.options.getInteger("roleid");
 
     try {
+      await interaction.deferReply({ ephemeral: true });
 
       const csrfResponse = await fetch("https://auth.roblox.com/v2/logout", {
         method: "POST",
@@ -333,23 +330,14 @@ client.on("interactionCreate", async (interaction) => {
 
       if (!roleResponse.ok) {
         const errorText = await roleResponse.text();
-        return interaction.reply({
-          content: `❌ Rank change failed:\n${errorText}`,
-          ephemeral: true
-        });
+        return sendInteractionResponse(interaction, `❌ Rank change failed:\n${errorText}`);
       }
 
-      return interaction.reply({
-        content: "✅ User rank updated successfully.",
-        ephemeral: true
-      });
+      return sendInteractionResponse(interaction, "✅ User rank updated successfully.");
 
     } catch (err) {
       console.error("Rank error:", err);
-      return interaction.reply({
-        content: "❌ Unexpected error occurred.",
-        ephemeral: true
-      });
+      return sendInteractionResponse(interaction, "❌ Unexpected error occurred.");
     }
   }
 
