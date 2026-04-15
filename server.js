@@ -202,13 +202,8 @@ function normalizeEventParticipant(participant) {
   };
 }
 
-function normalizeEventParticipants(participants, existingParticipants = []) {
-  const sourceParticipants = Array.isArray(participants) ? participants : existingParticipants;
-  const normalizedParticipants = sourceParticipants
-    .map(normalizeEventParticipant)
-    .filter(Boolean);
-
-  normalizedParticipants.sort((left, right) => {
+function sortEventParticipants(participants) {
+  participants.sort((left, right) => {
     if (left.deathRecordedAt !== right.deathRecordedAt) {
       return left.deathRecordedAt - right.deathRecordedAt;
     }
@@ -216,7 +211,47 @@ function normalizeEventParticipants(participants, existingParticipants = []) {
     return left.loreName.localeCompare(right.loreName);
   });
 
-  return normalizedParticipants;
+  return participants;
+}
+
+function normalizeEventParticipants(participants) {
+  const sourceParticipants = Array.isArray(participants) ? participants : [];
+  const normalizedParticipants = sourceParticipants
+    .map(normalizeEventParticipant)
+    .filter(Boolean);
+
+  return sortEventParticipants(normalizedParticipants);
+}
+
+function mergeEventParticipants(incomingParticipants, existingParticipants = []) {
+  const participantMap = new Map();
+
+  for (const participant of existingParticipants) {
+    participantMap.set(participant.userId, participant);
+  }
+
+  for (const participant of incomingParticipants) {
+    const existingParticipant = participantMap.get(participant.userId);
+    if (!existingParticipant) {
+      participantMap.set(participant.userId, participant);
+      continue;
+    }
+
+    if (participant.updatedAt > existingParticipant.updatedAt) {
+      participantMap.set(participant.userId, participant);
+      continue;
+    }
+
+    if (
+      participant.updatedAt === existingParticipant.updatedAt
+      && participant.status === "injury"
+      && existingParticipant.status !== "injury"
+    ) {
+      participantMap.set(participant.userId, participant);
+    }
+  }
+
+  return sortEventParticipants(Array.from(participantMap.values()));
 }
 
 function trackEventSessionOrder(eventId) {
@@ -246,6 +281,10 @@ function upsertEventSession(payload) {
     return existingSession;
   }
 
+  const incomingParticipants = normalizeEventParticipants(
+    payload?.participants ?? payload?.entries ?? payload?.deaths
+  );
+
   const session = {
     eventId,
     mapName: formatOptionalString(payload?.mapName, existingSession?.mapName || "Unknown Map"),
@@ -256,13 +295,95 @@ function upsertEventSession(payload) {
       : parseTimestamp(payload?.endedAt) ?? existingSession?.endedAt ?? Date.now(),
     updatedAt: incomingUpdatedAt ?? Date.now(),
     resources: normalizeEventResources(payload?.resources, existingSession?.resources),
-    participants: normalizeEventParticipants(payload?.participants ?? payload?.entries ?? payload?.deaths, existingSession?.participants),
+    participants: mergeEventParticipants(incomingParticipants, existingSession?.participants),
     eventAnnouncement: existingSession?.eventAnnouncement || null,
     postedSummary: existingSession?.postedSummary || null,
   };
 
   eventSessions.set(eventId, session);
   trackEventSessionOrder(eventId);
+  return session;
+}
+
+function findLatestEventParticipantSession(targetUserId) {
+  const parsedUserId = parsePositiveInteger(targetUserId);
+  if (!parsedUserId) {
+    return null;
+  }
+
+  for (let index = eventSessionOrder.length - 1; index >= 0; index -= 1) {
+    const eventId = eventSessionOrder[index];
+    const session = eventSessions.get(eventId);
+    if (!session) {
+      continue;
+    }
+
+    const participant = Array.isArray(session.participants)
+      ? session.participants.find((entry) => entry.userId === parsedUserId)
+      : null;
+    if (participant) {
+      return { session, participant };
+    }
+  }
+
+  return null;
+}
+
+async function syncResolvedEventParticipant(record) {
+  if (record.actionType !== "unwipe" && record.actionType !== "restore") {
+    return null;
+  }
+
+  const resolvedUserId = parsePositiveInteger(record.resolvedTargetUserId) ?? parsePositiveInteger(record.targetUserId);
+  if (!resolvedUserId) {
+    return null;
+  }
+
+  const matchedEvent = findLatestEventParticipantSession(resolvedUserId);
+  if (!matchedEvent) {
+    return null;
+  }
+
+  const { session, participant } = matchedEvent;
+  const resolvedAt = Date.now();
+  participant.status = "injury";
+  participant.updatedAt = resolvedAt;
+  participant.restoredAt = resolvedAt;
+  participant.restoreAction = record.actionType;
+
+  const moderatorName = formatOptionalString(record.requestedByTag);
+  if (moderatorName) {
+    participant.moderatorName = moderatorName;
+  }
+
+  const snapshotId = formatOptionalString(record.snapshotId);
+  if (snapshotId) {
+    participant.snapshotId = snapshotId;
+  }
+
+  session.updatedAt = Math.max(session.updatedAt || 0, resolvedAt);
+  trackEventSessionOrder(session.eventId);
+
+  if (!client.isReady()) {
+    return session;
+  }
+
+  if (session.postedSummary?.messageId) {
+    try {
+      await refreshEventSummary(session);
+    } catch (err) {
+      console.error("Failed refreshing resolved event summary:", err);
+    }
+  }
+
+  if (session.eventAnnouncement?.messageId) {
+    try {
+      await syncEventAnnouncement(session);
+    } catch (err) {
+      console.error("Failed syncing resolved event announcement:", err);
+    }
+  }
+
   return session;
 }
 
@@ -722,6 +843,13 @@ async function logAdminActionCompletion(record) {
     `Result: ${formatTranscriptValue(record.resultMessage, "No result message was provided.")}`,
   ];
 
+  if (
+    record.resolvedTargetUserId
+    && String(record.resolvedTargetUserId) !== String(record.targetUserId)
+  ) {
+    lines.push(`Resolved Roblox ID: ${formatTranscriptValue(record.resolvedTargetUserId)}`);
+  }
+
   if (record.snapshotId) {
     lines.push(`Snapshot: ${formatTranscriptValue(record.snapshotId)}`);
   }
@@ -788,9 +916,20 @@ async function finalizeAdminAction(record, report) {
   record.resultMessage = typeof report.message === "string" && report.message.length > 0
     ? report.message
     : "No result message was provided.";
+  record.resolvedTargetUserId = parsePositiveInteger(report.resolvedUserId)
+    ?? record.resolvedTargetUserId
+    ?? parsePositiveInteger(record.targetUserId);
 
   if (record.dedupeKey) {
     adminActionDedupe.delete(record.dedupeKey);
+  }
+
+  if (record.resultSuccess) {
+    try {
+      await syncResolvedEventParticipant(record);
+    } catch (err) {
+      console.error("Failed syncing resolved event participant:", err);
+    }
   }
 
   resolveAdminActionWaiter(record.id, record);
@@ -1542,6 +1681,7 @@ app.post("/adminActions/report", async (req, res) => {
   await finalizeAdminAction(record, {
     success: req.body?.success === true,
     message: typeof req.body?.message === "string" ? req.body.message : "",
+    resolvedUserId: req.body?.resolvedUserId,
   });
 
   res.send("Action report received");
