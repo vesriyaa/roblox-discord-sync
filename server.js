@@ -33,6 +33,7 @@ const WALD_ROLE_ID = "1415902349192331381";
 const ENVISIONED_ROLE_ID = "1415902349192331383";
 const WIPE_CHANNEL_ID = "1492143731921387520";
 const DEATH_CHANNEL_ID = "1415902351985872908";
+const BOT_TRANSCRIPTS_CHANNEL_ID = "1493921133605683322";
 
 // 🔹 Team → Role mapping
 const roleMap = {
@@ -346,6 +347,110 @@ function getAdminActionDescription(action) {
   return `admin action for Roblox user ${action.targetUserId}`;
 }
 
+function getAdminActionSourceLabel(action) {
+  return action.sourceMessage ? "button press" : "slash command";
+}
+
+function buildSourceMessageUrl(sourceMessage) {
+  if (!sourceMessage?.channelId || !sourceMessage?.messageId) {
+    return null;
+  }
+
+  return `https://discord.com/channels/${GUILD_ID}/${sourceMessage.channelId}/${sourceMessage.messageId}`;
+}
+
+function formatTranscriptTimestamp(timestampMs) {
+  const unixSeconds = Math.floor(Number(timestampMs || Date.now()) / 1000);
+  return `<t:${unixSeconds}:F>`;
+}
+
+function formatTranscriptValue(value, fallback = "N/A") {
+  if (typeof value === "string") {
+    const trimmedValue = value.trim();
+    if (trimmedValue.length > 0) {
+      return trimmedValue.length > 900
+        ? `${trimmedValue.slice(0, 897)}...`
+        : trimmedValue;
+    }
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  return fallback;
+}
+
+async function postAdminActionTranscript(lines) {
+  const channel = await client.channels.fetch(BOT_TRANSCRIPTS_CHANNEL_ID);
+  if (!channel || typeof channel.send !== "function") {
+    return;
+  }
+
+  await channel.send({
+    content: lines.join("\n"),
+  });
+}
+
+async function logAdminActionRequest(actionData, duplicateRecord = null) {
+  const lines = [
+    `**Admin Action ${duplicateRecord ? "Duplicate Request" : "Queued"}**`,
+    `Date/Time: ${formatTranscriptTimestamp(Date.now())}`,
+    `Moderator: ${actionData.requestedByTag} (<@${actionData.requestedById}>)`,
+    `Source: ${getAdminActionSourceLabel(actionData)}`,
+    `Command: ${getActionLabel(actionData.actionType)}`,
+    `Target: ${formatTranscriptValue(actionData.targetUserId)}`,
+  ];
+
+  if (actionData.snapshotId) {
+    lines.push(`Snapshot: ${formatTranscriptValue(actionData.snapshotId)}`);
+  }
+
+  if (actionData.reason) {
+    lines.push(`Reason: ${formatTranscriptValue(actionData.reason)}`);
+  }
+
+  const sourceMessageUrl = buildSourceMessageUrl(actionData.sourceMessage);
+  if (sourceMessageUrl) {
+    lines.push(`Source Message: ${sourceMessageUrl}`);
+  }
+
+  if (duplicateRecord) {
+    lines.push(`Already Queued By: ${duplicateRecord.requestedByTag} (<@${duplicateRecord.requestedById}>)`);
+    lines.push(`Original Queue Time: ${formatTranscriptTimestamp(duplicateRecord.createdAt)}`);
+  }
+
+  await postAdminActionTranscript(lines);
+}
+
+async function logAdminActionCompletion(record) {
+  const lines = [
+    `**Admin Action ${record.resultSuccess ? "Completed" : "Failed"}**`,
+    `Date/Time: ${formatTranscriptTimestamp(record.completedAt || Date.now())}`,
+    `Moderator: ${record.requestedByTag} (<@${record.requestedById}>)`,
+    `Source: ${getAdminActionSourceLabel(record)}`,
+    `Command: ${getActionLabel(record.actionType)}`,
+    `Target: ${formatTranscriptValue(record.targetUserId)}`,
+    `Requested At: ${formatTranscriptTimestamp(record.createdAt)}`,
+    `Result: ${formatTranscriptValue(record.resultMessage, "No result message was provided.")}`,
+  ];
+
+  if (record.snapshotId) {
+    lines.push(`Snapshot: ${formatTranscriptValue(record.snapshotId)}`);
+  }
+
+  if (record.reason) {
+    lines.push(`Reason: ${formatTranscriptValue(record.reason)}`);
+  }
+
+  const sourceMessageUrl = buildSourceMessageUrl(record.sourceMessage);
+  if (sourceMessageUrl) {
+    lines.push(`Source Message: ${sourceMessageUrl}`);
+  }
+
+  await postAdminActionTranscript(lines);
+}
+
 async function disableSourceMessageButtons(record) {
   const source = record.sourceMessage;
   if (!source?.channelId || !source?.messageId) {
@@ -403,6 +508,12 @@ async function finalizeAdminAction(record, report) {
 
   resolveAdminActionWaiter(record.id, record);
 
+  try {
+    await logAdminActionCompletion(record);
+  } catch (err) {
+    console.error("Failed posting admin action transcript:", err);
+  }
+
   if (record.sourceMessage) {
     try {
       await disableSourceMessageButtons(record);
@@ -418,16 +529,6 @@ async function finalizeAdminAction(record, report) {
   }
 }
 
-async function queueAndAwaitAdminAction(actionData, timeoutMs = ADMIN_ACTION_WAIT_TIMEOUT_MS) {
-  const { record, duplicate } = queueAdminAction(actionData);
-  const completedRecord = await waitForAdminActionCompletion(record.id, timeoutMs);
-
-  return {
-    duplicate,
-    record: completedRecord || record,
-  };
-}
-
 async function getInteractionMember(interaction) {
   const guild = await client.guilds.fetch(GUILD_ID);
   const member = await guild.members.fetch(interaction.user.id);
@@ -438,13 +539,22 @@ async function getInteractionMember(interaction) {
 async function handleQueuedAdminAction(interaction, actionData) {
   await interaction.deferReply({ ephemeral: true });
 
-  const { duplicate, record } = await queueAndAwaitAdminAction(actionData);
-  if (record.status === "completed") {
-    return interaction.editReply(record.resultMessage);
+  const { duplicate, record } = queueAdminAction(actionData);
+
+  try {
+    await logAdminActionRequest(actionData, duplicate ? record : null);
+  } catch (err) {
+    console.error("Failed posting admin action transcript:", err);
   }
 
-  if (record.status === "failed") {
-    return interaction.editReply(record.resultMessage);
+  const completedRecord = await waitForAdminActionCompletion(record.id, ADMIN_ACTION_WAIT_TIMEOUT_MS);
+  const resolvedRecord = completedRecord || record;
+  if (resolvedRecord.status === "completed") {
+    return interaction.editReply(resolvedRecord.resultMessage);
+  }
+
+  if (resolvedRecord.status === "failed") {
+    return interaction.editReply(resolvedRecord.resultMessage);
   }
 
   if (duplicate) {
