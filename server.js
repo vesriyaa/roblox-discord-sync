@@ -35,6 +35,7 @@ const WIPE_CHANNEL_ID = "1492143731921387520";
 const DEATH_CHANNEL_ID = "1415902351985872908";
 const BOT_TRANSCRIPTS_CHANNEL_ID = "1493921133605683322";
 const EVENT_LOGS_CHANNEL_ID = "1493925383706513419";
+const EVENT_STATUS_CHANNEL_ID = "1493917062953701407";
 
 // 🔹 Team → Role mapping
 const roleMap = {
@@ -256,6 +257,7 @@ function upsertEventSession(payload) {
     updatedAt: incomingUpdatedAt ?? Date.now(),
     resources: normalizeEventResources(payload?.resources, existingSession?.resources),
     participants: normalizeEventParticipants(payload?.participants ?? payload?.entries ?? payload?.deaths, existingSession?.participants),
+    eventAnnouncement: existingSession?.eventAnnouncement || null,
     postedSummary: existingSession?.postedSummary || null,
   };
 
@@ -299,6 +301,70 @@ function buildDiscordMessageUrl(channelId, messageId) {
   }
 
   return `https://discord.com/channels/${GUILD_ID}/${channelId}/${messageId}`;
+}
+
+function formatDiscordTimestamp(timestamp) {
+  const parsedTimestamp = parseTimestamp(timestamp);
+  if (!parsedTimestamp) {
+    return "Unknown";
+  }
+
+  return `<t:${parsedTimestamp}:F>`;
+}
+
+function buildEventStatusMessage(session) {
+  return [
+    "**Event Tracker**",
+    `Event ID: \`${session.eventId}\``,
+    `Map: **${session.mapName}**`,
+    `Status: **${session.active ? "Active" : "Ended"}**`,
+    `Started: ${formatDiscordTimestamp(session.startedAt)}`,
+    `Last Update: ${formatDiscordTimestamp(session.updatedAt)}`,
+    `Summary Command: \`/postevent eventid:${session.eventId}\``,
+  ].join("\n");
+}
+
+async function postEventAnnouncement(session) {
+  const channel = await client.channels.fetch(EVENT_STATUS_CHANNEL_ID);
+  if (!channel || typeof channel.send !== "function") {
+    throw new Error("Event status channel unavailable");
+  }
+
+  const message = await channel.send({
+    content: buildEventStatusMessage(session),
+  });
+
+  session.eventAnnouncement = {
+    channelId: channel.id,
+    messageId: message.id,
+    updatedAt: Date.now(),
+  };
+
+  return message;
+}
+
+async function syncEventAnnouncement(session) {
+  const currentAnnouncement = session.eventAnnouncement;
+  if (!currentAnnouncement?.channelId || !currentAnnouncement?.messageId) {
+    return postEventAnnouncement(session);
+  }
+
+  const channel = await client.channels.fetch(currentAnnouncement.channelId);
+  if (!channel?.messages?.fetch) {
+    return postEventAnnouncement(session);
+  }
+
+  try {
+    const message = await channel.messages.fetch(currentAnnouncement.messageId);
+    await message.edit({
+      content: buildEventStatusMessage(session),
+    });
+
+    session.eventAnnouncement.updatedAt = Date.now();
+    return message;
+  } catch {
+    return postEventAnnouncement(session);
+  }
 }
 
 async function postEventSummary(session) {
@@ -1376,7 +1442,7 @@ app.post("/relayWebhook/:service", async (req, res) => {
   }
 });
 
-app.post("/eventSessions/sync", (req, res) => {
+app.post("/eventSessions/sync", async (req, res) => {
 
   if (req.headers["x-api-key"] !== API_KEY) {
     return res.status(403).send("Unauthorized");
@@ -1385,6 +1451,14 @@ app.post("/eventSessions/sync", (req, res) => {
   const session = upsertEventSession(req.body || {});
   if (!session) {
     return res.status(400).send("Missing event session payload");
+  }
+
+  if (client.isReady()) {
+    try {
+      await syncEventAnnouncement(session);
+    } catch (err) {
+      console.error("Event announcement sync error:", err);
+    }
   }
 
   res.json({
