@@ -24,6 +24,8 @@ const MOD_ROLE_ID = "1477872215801331763";
 // 🔹 DISCORD ROLE SWAP
 const WALD_ROLE_ID = "1415902349192331381";
 const ENVISIONED_ROLE_ID = "1415902349192331383";
+const WIPE_CHANNEL_ID = "1492143731921387520";
+const DEATH_CHANNEL_ID = "1415902351985872908";
 
 // 🔹 Team → Role mapping
 const roleMap = {
@@ -85,6 +87,38 @@ function sendInteractionResponse(interaction, content) {
     content,
     ephemeral: true
   });
+}
+
+function getRelayChannelId(service) {
+  const relayChannels = {
+    wipe: WIPE_CHANNEL_ID,
+    death: DEATH_CHANNEL_ID,
+  };
+
+  return relayChannels[service] || null;
+}
+
+function buildRelayMessagePayload(body) {
+  const messagePayload = {};
+  const embeds = Array.isArray(body?.embeds)
+    ? body.embeds
+    : body?.embeds
+      ? [body.embeds]
+      : [];
+
+  if (typeof body?.content === "string" && body.content.length > 0) {
+    messagePayload.content = body.content;
+  }
+
+  if (embeds.length > 0) {
+    messagePayload.embeds = embeds;
+  }
+
+  if (body?.allowedMentions) {
+    messagePayload.allowedMentions = body.allowedMentions;
+  }
+
+  return messagePayload;
 }
 
 
@@ -435,6 +469,42 @@ app.post("/updateRole", async (req, res) => {
   } catch (err) {
     console.error("Role update error:", err);
     res.status(500).send("Error assigning role");
+  }
+});
+
+app.post("/relayWebhook/:service", async (req, res) => {
+
+  if (req.headers["x-api-key"] !== API_KEY) {
+    return res.status(403).send("Unauthorized");
+  }
+
+  if (!client.isReady()) {
+    return res.status(503).send("Bot not ready");
+  }
+
+  const service = String(req.params.service || "").toLowerCase();
+  const channelId = getRelayChannelId(service);
+  if (!channelId) {
+    return res.status(404).send("Unknown relay service");
+  }
+
+  const messagePayload = buildRelayMessagePayload(req.body || {});
+  if (!messagePayload.content && (!Array.isArray(messagePayload.embeds) || messagePayload.embeds.length === 0)) {
+    return res.status(400).send("Missing relay message payload");
+  }
+
+  try {
+    const channel = await client.channels.fetch(channelId);
+    if (!channel || typeof channel.send !== "function") {
+      return res.status(500).send("Relay channel unavailable");
+    }
+
+    await channel.send(messagePayload);
+    res.send("Relay posted");
+
+  } catch (err) {
+    console.error("Relay webhook error:", err);
+    res.status(500).send("Error posting relay webhook");
   }
 });
 
