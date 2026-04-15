@@ -56,6 +56,7 @@ const eventSessionOrder = [];
 const ADMIN_ACTION_WAIT_TIMEOUT_MS = 15000;
 const ADMIN_ACTION_CLAIM_TIMEOUT_MS = 60000;
 const ADMIN_ACTION_RETENTION_MS = 30 * 60 * 1000;
+const INTERACTION_FOLLOW_UP_WINDOW_MS = 15 * 60 * 1000;
 const EVENT_SESSION_RETENTION_LIMIT = 250;
 
 async function resolveDiscordMember(guild, input) {
@@ -107,6 +108,45 @@ function sendInteractionResponse(interaction, content) {
     content,
     ephemeral: true
   });
+}
+
+function createVerificationRequest(interaction) {
+  return {
+    discordId: interaction.user.id,
+    applicationId: interaction.applicationId,
+    interactionToken: interaction.token,
+    createdAt: Date.now(),
+  };
+}
+
+async function sendVerificationCompletionFollowUp(verificationRequest) {
+  if (
+    !verificationRequest
+    || typeof verificationRequest.applicationId !== "string"
+    || typeof verificationRequest.interactionToken !== "string"
+  ) {
+    return false;
+  }
+
+  if ((Date.now() - verificationRequest.createdAt) >= INTERACTION_FOLLOW_UP_WINDOW_MS) {
+    return false;
+  }
+
+  const response = await fetch(
+    `https://discord.com/api/v10/webhooks/${verificationRequest.applicationId}/${verificationRequest.interactionToken}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        content: "✅ You have successfully verified your Roblox account!",
+        flags: 64,
+      }),
+    }
+  );
+
+  return response.ok;
 }
 
 function getRelayChannelId(service) {
@@ -1205,7 +1245,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    verificationCodes.set(code, interaction.user.id);
+    verificationCodes.set(code, createVerificationRequest(interaction));
 
     return interaction.reply({
       content: `Your verification code is: **${code}**\nEnter this in-game.`,
@@ -1471,7 +1511,10 @@ app.post("/verify", async (req, res) => {
   }
 
   const { code } = req.body;
-  const discordId = verificationCodes.get(code);
+  const verificationRequest = verificationCodes.get(code);
+  const discordId = typeof verificationRequest === "string"
+    ? verificationRequest
+    : verificationRequest?.discordId;
 
   if (!discordId) {
     return res.status(400).send("Invalid code");
@@ -1488,8 +1531,13 @@ app.post("/verify", async (req, res) => {
     }
 
     try {
-      await member.send("✅ You have successfully verified your Roblox account!");
-    } catch {}
+      const followUpSent = await sendVerificationCompletionFollowUp(verificationRequest);
+      if (!followUpSent) {
+        console.warn("Verification follow-up could not be delivered for Discord user:", discordId);
+      }
+    } catch (followUpErr) {
+      console.error("Verification follow-up error:", followUpErr);
+    }
 
   } catch (err) {
     console.error("Verification error:", err);
