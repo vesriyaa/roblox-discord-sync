@@ -36,6 +36,7 @@ const DEATH_CHANNEL_ID = "1415902351985872908";
 const BOT_TRANSCRIPTS_CHANNEL_ID = "1493921133605683322";
 const EVENT_LOGS_CHANNEL_ID = "1493925383706513419";
 const EVENT_STATUS_CHANNEL_ID = "1493917062953701407";
+const TALENTS_CHANNEL_ID = "1493382684217577472";
 
 // 🔹 Team → Role mapping
 const roleMap = {
@@ -51,11 +52,17 @@ const adminActions = new Map();
 const adminActionOrder = [];
 const adminActionDedupe = new Map();
 const adminActionWaiters = new Map();
+const talentLookupRequests = new Map();
+const talentLookupOrder = [];
+const talentLookupWaiters = new Map();
 const eventSessions = new Map();
 const eventSessionOrder = [];
 const ADMIN_ACTION_WAIT_TIMEOUT_MS = 15000;
 const ADMIN_ACTION_CLAIM_TIMEOUT_MS = 60000;
 const ADMIN_ACTION_RETENTION_MS = 30 * 60 * 1000;
+const TALENT_LOOKUP_WAIT_TIMEOUT_MS = 15000;
+const TALENT_LOOKUP_CLAIM_TIMEOUT_MS = 60000;
+const TALENT_LOOKUP_RETENTION_MS = 30 * 60 * 1000;
 const INTERACTION_FOLLOW_UP_WINDOW_MS = 15 * 60 * 1000;
 const EVENT_SESSION_RETENTION_LIMIT = 250;
 
@@ -761,6 +768,88 @@ function resolveAdminActionWaiter(actionId, record) {
   waiter.resolve(record);
 }
 
+function createTalentLookupId() {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function cleanupTalentLookupRecords() {
+  const cutoff = Date.now() - TALENT_LOOKUP_RETENTION_MS;
+
+  while (talentLookupOrder.length > 0) {
+    const oldestId = talentLookupOrder[0];
+    const record = talentLookupRequests.get(oldestId);
+    if (!record) {
+      talentLookupOrder.shift();
+      continue;
+    }
+
+    if ((record.status === "pending" || record.status === "claimed") || record.completedAt >= cutoff) {
+      break;
+    }
+
+    talentLookupRequests.delete(oldestId);
+    talentLookupOrder.shift();
+  }
+}
+
+function queueTalentLookup(lookupData) {
+  cleanupTalentLookupRecords();
+
+  const record = {
+    ...lookupData,
+    id: createTalentLookupId(),
+    status: "pending",
+    createdAt: Date.now(),
+    claimedAt: null,
+    completedAt: null,
+    resultSuccess: null,
+    resultMessage: null,
+    resolvedTargetUserId: null,
+    playerName: null,
+    online: null,
+    talents: [],
+    postedResult: null,
+  };
+
+  talentLookupRequests.set(record.id, record);
+  talentLookupOrder.push(record.id);
+  return record;
+}
+
+function waitForTalentLookupCompletion(lookupId, timeoutMs = TALENT_LOOKUP_WAIT_TIMEOUT_MS) {
+  const existingRecord = talentLookupRequests.get(lookupId);
+  if (!existingRecord) {
+    return Promise.resolve(null);
+  }
+
+  if (existingRecord.status === "completed" || existingRecord.status === "failed") {
+    return Promise.resolve(existingRecord);
+  }
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      talentLookupWaiters.delete(lookupId);
+      resolve(talentLookupRequests.get(lookupId) || null);
+    }, timeoutMs);
+
+    talentLookupWaiters.set(lookupId, {
+      resolve,
+      timeout,
+    });
+  });
+}
+
+function resolveTalentLookupWaiter(lookupId, record) {
+  const waiter = talentLookupWaiters.get(lookupId);
+  if (!waiter) {
+    return;
+  }
+
+  clearTimeout(waiter.timeout);
+  talentLookupWaiters.delete(lookupId);
+  waiter.resolve(record);
+}
+
 function parseAdminActionCustomId(customId) {
   const [prefix, actionType, targetUserId, snapshotId] = String(customId || "").split("|");
   if (prefix !== "adminAction" || !actionType || !targetUserId) {
@@ -827,6 +916,69 @@ function formatTranscriptValue(value, fallback = "N/A") {
   }
 
   return fallback;
+}
+
+function formatTalentLookupList(talents) {
+  if (!Array.isArray(talents) || talents.length === 0) {
+    return "*No saved talents found.*";
+  }
+
+  let formattedList = "";
+  for (const talent of talents) {
+    const formattedTalent = `\`${String(talent)}\``;
+    const candidate = formattedList.length > 0
+      ? `${formattedList}, ${formattedTalent}`
+      : formattedTalent;
+
+    if (candidate.length > 1700) {
+      return formattedList.length > 0 ? `${formattedList}, ...` : `${formattedTalent.slice(0, 1697)}...`;
+    }
+
+    formattedList = candidate;
+  }
+
+  return formattedList;
+}
+
+function buildTalentLookupContent(record) {
+  const resolvedUserId = parsePositiveInteger(record.resolvedTargetUserId) ?? parsePositiveInteger(record.targetUserId);
+  const targetLabel = record.playerName
+    ? `${record.playerName}${resolvedUserId ? ` (${resolvedUserId})` : ""}`
+    : formatTranscriptValue(record.targetUserId);
+
+  const lines = [
+    `**Talent Lookup ${record.resultSuccess ? "Completed" : "Failed"}**`,
+    `Requested By: ${record.requestedByTag} (<@${record.requestedById}>)`,
+    `Requested At: ${formatTranscriptTimestamp(record.createdAt)}`,
+    `Target: ${targetLabel}`,
+  ];
+
+  if (record.resultSuccess) {
+    lines.push(`Status: ${record.online ? "Online" : "Offline"}`);
+    lines.push(`Talents: ${formatTalentLookupList(record.talents)}`);
+  } else {
+    lines.push(`Result: ${formatTranscriptValue(record.resultMessage, "Talent lookup failed.")}`);
+  }
+
+  return lines.join("\n");
+}
+
+async function postTalentLookupResult(record) {
+  const channel = await client.channels.fetch(TALENTS_CHANNEL_ID);
+  if (!channel || typeof channel.send !== "function") {
+    throw new Error("Talents channel unavailable");
+  }
+
+  const message = await channel.send({
+    content: buildTalentLookupContent(record),
+  });
+
+  record.postedResult = {
+    channelId: message.channelId,
+    messageId: message.id,
+  };
+
+  return message;
 }
 
 async function postAdminActionTranscript(lines) {
@@ -995,6 +1147,33 @@ async function finalizeAdminAction(record, report) {
   }
 }
 
+async function finalizeTalentLookup(record, report) {
+  record.status = report.success ? "completed" : "failed";
+  record.completedAt = Date.now();
+  record.resultSuccess = report.success === true;
+  record.resultMessage = typeof report.message === "string" && report.message.length > 0
+    ? report.message
+    : "No result message was provided.";
+  record.resolvedTargetUserId = parsePositiveInteger(report.resolvedUserId)
+    ?? record.resolvedTargetUserId
+    ?? parsePositiveInteger(record.targetUserId);
+  record.playerName = formatOptionalString(report.playerName, record.playerName || "");
+  record.online = report.online === true;
+  record.talents = Array.isArray(report.talents)
+    ? report.talents.map((talent) => formatOptionalString(String(talent))).filter(Boolean)
+    : [];
+
+  if (client.isReady()) {
+    try {
+      await postTalentLookupResult(record);
+    } catch (err) {
+      console.error("Failed posting talent lookup result:", err);
+    }
+  }
+
+  resolveTalentLookupWaiter(record.id, record);
+}
+
 async function getInteractionMember(interaction) {
   const guild = await client.guilds.fetch(GUILD_ID);
   const member = await guild.members.fetch(interaction.user.id);
@@ -1028,6 +1207,30 @@ async function handleQueuedAdminAction(interaction, actionData) {
   }
 
   return interaction.editReply(`Queued ${getAdminActionDescription(record)}. I will post the result once Studio processes it.`);
+}
+
+async function handleQueuedTalentLookup(interaction, lookupData) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const record = queueTalentLookup(lookupData);
+  const completedRecord = await waitForTalentLookupCompletion(record.id, TALENT_LOOKUP_WAIT_TIMEOUT_MS);
+  const resolvedRecord = completedRecord || record;
+  if (resolvedRecord.status === "completed") {
+    const messageUrl = buildDiscordMessageUrl(
+      resolvedRecord.postedResult?.channelId,
+      resolvedRecord.postedResult?.messageId
+    );
+
+    return interaction.editReply(messageUrl
+      ? `Posted talents for ${resolvedRecord.playerName || resolvedRecord.targetUserId}: ${messageUrl}`
+      : `Resolved talents for ${resolvedRecord.playerName || resolvedRecord.targetUserId}, but I could not post them in <#${TALENTS_CHANNEL_ID}>.`);
+  }
+
+  if (resolvedRecord.status === "failed") {
+    return interaction.editReply(resolvedRecord.resultMessage);
+  }
+
+  return interaction.editReply(`Queued a talent lookup for ${lookupData.targetUserId}. I will post the result in <#${TALENTS_CHANNEL_ID}> once Studio responds.`);
 }
 
 async function handleEventSummaryCommand(interaction, mode, member) {
@@ -1152,6 +1355,17 @@ client.once("ready", async () => {
         option.setName("snapshot")
           .setDescription("Snapshot ID or latest")
           .setRequired(false)
+      )
+  );
+
+  await guild.commands.create(
+    new SlashCommandBuilder()
+      .setName("talents")
+      .setDescription("Look up a Roblox player's saved talents")
+      .addStringOption(option =>
+        option.setName("robloxid")
+          .setDescription("Roblox username or user ID")
+          .setRequired(true)
       )
   );
 
@@ -1428,6 +1642,27 @@ client.on("interactionCreate", async (interaction) => {
       requestedById: interaction.user.id,
       requestedByTag: interaction.user.tag,
       dedupeKey: `restore:${String(robloxInput).toLowerCase()}:${snapshotId.toLowerCase()}`,
+    });
+  }
+
+  // ===============================
+  // TALENTS
+  // ===============================
+  if (interaction.commandName === "talents") {
+
+    if (!hasModPermissions(member)) {
+      return interaction.reply({
+        content: "❌ You do not have permission.",
+        ephemeral: true,
+      });
+    }
+
+    const robloxInput = interaction.options.getString("robloxid");
+
+    return handleQueuedTalentLookup(interaction, {
+      targetUserId: robloxInput,
+      requestedById: interaction.user.id,
+      requestedByTag: interaction.user.tag,
     });
   }
 
@@ -1733,6 +1968,70 @@ app.post("/adminActions/report", async (req, res) => {
   });
 
   res.send("Action report received");
+});
+
+app.post("/talentLookups/claim", (req, res) => {
+
+  if (req.headers["x-api-key"] !== API_KEY) {
+    return res.status(403).send("Unauthorized");
+  }
+
+  cleanupTalentLookupRecords();
+
+  const now = Date.now();
+  const nextRecord = talentLookupOrder
+    .map((lookupId) => talentLookupRequests.get(lookupId))
+    .find((record) =>
+      record
+      && (
+        record.status === "pending"
+        || (record.status === "claimed" && record.claimedAt && (now - record.claimedAt) >= TALENT_LOOKUP_CLAIM_TIMEOUT_MS)
+      )
+    );
+
+  if (!nextRecord) {
+    return res.json({ lookup: null });
+  }
+
+  nextRecord.status = "claimed";
+  nextRecord.claimedAt = now;
+
+  return res.json({
+    lookup: {
+      id: nextRecord.id,
+      targetUserId: nextRecord.targetUserId,
+      requestedById: nextRecord.requestedById,
+      requestedByTag: nextRecord.requestedByTag,
+    },
+  });
+});
+
+app.post("/talentLookups/report", async (req, res) => {
+
+  if (req.headers["x-api-key"] !== API_KEY) {
+    return res.status(403).send("Unauthorized");
+  }
+
+  const lookupId = typeof req.body?.id === "string" ? req.body.id : null;
+  if (!lookupId) {
+    return res.status(400).send("Missing lookup id");
+  }
+
+  const record = talentLookupRequests.get(lookupId);
+  if (!record) {
+    return res.status(404).send("Lookup not found");
+  }
+
+  await finalizeTalentLookup(record, {
+    success: req.body?.success === true,
+    message: typeof req.body?.message === "string" ? req.body.message : "",
+    resolvedUserId: req.body?.resolvedUserId,
+    playerName: typeof req.body?.playerName === "string" ? req.body.playerName : "",
+    online: req.body?.online === true,
+    talents: Array.isArray(req.body?.talents) ? req.body.talents : [],
+  });
+
+  res.send("Talent lookup report received");
 });
 
 // ===============================
