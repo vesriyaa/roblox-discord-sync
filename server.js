@@ -4,13 +4,55 @@ const {
   ButtonBuilder,
   ButtonStyle,
   Client,
-  EmbedBuilder,
   GatewayIntentBits,
-  ModalBuilder,
-  SlashCommandBuilder,
-  TextInputBuilder,
-  TextInputStyle,
 } = require("discord.js");
+const {
+  ADMIN_ACTION_CLAIM_TIMEOUT_MS,
+  ADMIN_ACTION_RETENTION_MS,
+  ADMIN_ACTION_WAIT_TIMEOUT_MS,
+  API_KEY,
+  BOT_TOKEN,
+  BOT_TRANSCRIPTS_CHANNEL_ID,
+  DEATH_CHANNEL_ID,
+  ENVISIONED_ROLE_ID,
+  EVENT_LOGS_CHANNEL_ID,
+  EVENT_SESSION_RETENTION_LIMIT,
+  EVENT_STATUS_CHANNEL_ID,
+  EXAM_SERVICE_CHANNEL_ID,
+  GROUP_ID,
+  GUILD_ID,
+  INTERACTION_FOLLOW_UP_WINDOW_MS,
+  MOD_ROLE_ID,
+  TALENTS_CHANNEL_ID,
+  TALENT_LOOKUP_CLAIM_TIMEOUT_MS,
+  TALENT_LOOKUP_RETENTION_MS,
+  TALENT_LOOKUP_WAIT_TIMEOUT_MS,
+  VERIFIED_ROLE_ID,
+  WALD_ROLE_ID,
+  WIPE_CHANNEL_ID,
+  roleMap,
+} = require("./src/config");
+const {
+  adminActionDedupe,
+  adminActionOrder,
+  adminActionWaiters,
+  adminActions,
+  eventSessionOrder,
+  eventSessions,
+  talentLookupOrder,
+  talentLookupRequests,
+  talentLookupWaiters,
+  unlinkedUsers,
+  verificationCodes,
+} = require("./src/state");
+const { handleEditPanelCommand, handleEditablePostModalSubmit, handlePostPanelCommand } = require("./src/panels");
+const { registerSlashCommands } = require("./src/registerSlashCommands");
+const {
+  buildDiscordMessageUrl,
+  formatOptionalString,
+  parsePositiveInteger,
+  parseTimestamp,
+} = require("./src/utils");
 
 const app = express();
 app.use(express.json());
@@ -23,57 +65,9 @@ const client = new Client({
   ]
 });
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const GUILD_ID = process.env.GUILD_ID;
-const API_KEY = process.env.API_KEY;
-const GROUP_ID = process.env.GROUP_ID;
-
 // 🔹 ROLE IDS
-const VERIFIED_ROLE_ID = "1477834795512893520";
-const MOD_ROLE_ID = "1477872215801331763";
-
 // 🔹 DISCORD ROLE SWAP
-const WALD_ROLE_ID = "1415902349192331381";
-const ENVISIONED_ROLE_ID = "1415902349192331383";
-const WIPE_CHANNEL_ID = "1492143731921387520";
-const DEATH_CHANNEL_ID = "1415902351985872908";
-const EXAM_SERVICE_CHANNEL_ID = "1415902351985872909";
-const BOT_TRANSCRIPTS_CHANNEL_ID = "1493921133605683322";
-const EVENT_LOGS_CHANNEL_ID = "1493925383706513419";
-const EVENT_STATUS_CHANNEL_ID = "1493917062953701407";
-const TALENTS_CHANNEL_ID = "1493382684217577472";
-const EDITABLE_POST_MODAL_PREFIX = "editablePost";
-const EDITABLE_POST_TITLE_FIELD_ID = "title";
-const EDITABLE_POST_BODY_FIELD_ID = "body";
-
 // 🔹 Team → Role mapping
-const roleMap = {
-  "Crimson Blades": "1477828058949091481",
-  "Vanguard": "1477828166025220178",
-  "Fame": "1477827943278317660",
-  "Chasers": "1477828132269457559"
-};
-
-const verificationCodes = new Map();
-const unlinkedUsers = new Set();
-const adminActions = new Map();
-const adminActionOrder = [];
-const adminActionDedupe = new Map();
-const adminActionWaiters = new Map();
-const talentLookupRequests = new Map();
-const talentLookupOrder = [];
-const talentLookupWaiters = new Map();
-const eventSessions = new Map();
-const eventSessionOrder = [];
-const ADMIN_ACTION_WAIT_TIMEOUT_MS = 15000;
-const ADMIN_ACTION_CLAIM_TIMEOUT_MS = 60000;
-const ADMIN_ACTION_RETENTION_MS = 30 * 60 * 1000;
-const TALENT_LOOKUP_WAIT_TIMEOUT_MS = 15000;
-const TALENT_LOOKUP_CLAIM_TIMEOUT_MS = 60000;
-const TALENT_LOOKUP_RETENTION_MS = 30 * 60 * 1000;
-const INTERACTION_FOLLOW_UP_WINDOW_MS = 15 * 60 * 1000;
-const EVENT_SESSION_RETENTION_LIMIT = 250;
-
 async function resolveDiscordMember(guild, input) {
   const rawInput = input.trim();
   const mentionMatch = rawInput.match(/^<@!?(\d+)>$/);
@@ -195,170 +189,6 @@ function buildRelayMessagePayload(body) {
   }
 
   return messagePayload;
-}
-
-function formatOptionalString(value, fallback = "") {
-  if (typeof value !== "string") {
-    return fallback;
-  }
-
-  const trimmedValue = value.trim();
-  return trimmedValue.length > 0 ? trimmedValue : fallback;
-}
-
-function parsePositiveInteger(value) {
-  const parsedValue = Number.parseInt(String(value ?? ""), 10);
-  return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : null;
-}
-
-function parseTimestamp(value) {
-  const parsedValue = Number(value);
-  return Number.isFinite(parsedValue) && parsedValue > 0 ? Math.floor(parsedValue) : null;
-}
-
-function parseChannelIdInput(value) {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const trimmedValue = value.trim();
-  if (/^\d+$/.test(trimmedValue)) {
-    return trimmedValue;
-  }
-
-  const mentionMatch = trimmedValue.match(/^<#(\d+)>$/);
-  return mentionMatch?.[1] ?? null;
-}
-
-function parseEditableMessageReference(value) {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const trimmedValue = value.trim();
-  const urlMatch = trimmedValue.match(/^https?:\/\/(?:canary\.|ptb\.)?discord\.com\/channels\/(\d+)\/(\d+)\/(\d+)$/);
-  if (urlMatch) {
-    const [, guildId, channelId, messageId] = urlMatch;
-    return { guildId, channelId, messageId };
-  }
-
-  const shorthandMatch = trimmedValue.match(/^(\d+)\s*[:/]\s*(\d+)$/);
-  if (shorthandMatch) {
-    const [, channelId, messageId] = shorthandMatch;
-    return { guildId: GUILD_ID, channelId, messageId };
-  }
-
-  return null;
-}
-
-function parseEditablePostModalCustomId(customId) {
-  const [prefix, mode, channelId, messageId] = String(customId || "").split("|");
-  if (prefix !== EDITABLE_POST_MODAL_PREFIX || !mode || !channelId) {
-    return null;
-  }
-
-  if (mode === "create") {
-    return { mode, channelId, messageId: null };
-  }
-
-  if (mode === "edit" && messageId) {
-    return { mode, channelId, messageId };
-  }
-
-  return null;
-}
-
-function clampModalValue(value, maxLength) {
-  const normalizedValue = formatOptionalString(value);
-  if (!normalizedValue) {
-    return "";
-  }
-
-  return normalizedValue.length > maxLength
-    ? normalizedValue.slice(0, maxLength)
-    : normalizedValue;
-}
-
-function buildEditablePostEmbed(title, body) {
-  return new EmbedBuilder()
-    .setTitle(title)
-    .setDescription(body);
-}
-
-function buildEditablePostModal(customId, initialValues = {}) {
-  const titleInput = new TextInputBuilder()
-    .setCustomId(EDITABLE_POST_TITLE_FIELD_ID)
-    .setLabel("Title")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true)
-    .setMaxLength(256);
-
-  const bodyInput = new TextInputBuilder()
-    .setCustomId(EDITABLE_POST_BODY_FIELD_ID)
-    .setLabel("Body")
-    .setStyle(TextInputStyle.Paragraph)
-    .setRequired(true)
-    .setMaxLength(4000);
-
-  const initialTitle = clampModalValue(initialValues.title, 256);
-  if (initialTitle) {
-    titleInput.setValue(initialTitle);
-  }
-
-  const initialBody = clampModalValue(initialValues.body, 4000);
-  if (initialBody) {
-    bodyInput.setValue(initialBody);
-  }
-
-  return new ModalBuilder()
-    .setCustomId(customId)
-    .setTitle(initialValues.mode === "edit" ? "Edit Panel" : "Create Panel")
-    .addComponents(
-      new ActionRowBuilder().addComponents(titleInput),
-      new ActionRowBuilder().addComponents(bodyInput),
-    );
-}
-
-async function fetchTargetChannel(channelId) {
-  const channel = await client.channels.fetch(channelId);
-  if (!channel || typeof channel.send !== "function") {
-    throw new Error("That channel is unavailable or cannot receive messages.");
-  }
-
-  if (channel.guildId && channel.guildId !== GUILD_ID) {
-    throw new Error("That channel is not in the configured guild.");
-  }
-
-  return channel;
-}
-
-async function fetchEditableBotMessage(channelId, messageId) {
-  const channel = await fetchTargetChannel(channelId);
-  if (!channel.messages?.fetch) {
-    throw new Error("That channel does not support message editing.");
-  }
-
-  const message = await channel.messages.fetch(messageId);
-  if (!message) {
-    throw new Error("That message could not be found.");
-  }
-
-  if (message.author?.id !== client.user?.id) {
-    throw new Error("I can only edit messages that I posted.");
-  }
-
-  return { channel, message };
-}
-
-function getEditablePostInitialValues(message) {
-  const primaryEmbed = Array.isArray(message?.embeds) ? message.embeds[0] : null;
-  const title = formatOptionalString(primaryEmbed?.title);
-  const body = formatOptionalString(primaryEmbed?.description);
-
-  return {
-    title,
-    body,
-  };
 }
 
 function normalizeEventResources(resources, existingResources = {}) {
@@ -645,14 +475,6 @@ function buildEventSummaryMessage(session) {
     `*Blades Used: ${session.resources.bladesUsed}*`,
     `*Bandages Used: ${session.resources.bandagesUsed}*`,
   ].join("\n");
-}
-
-function buildDiscordMessageUrl(channelId, messageId) {
-  if (!channelId || !messageId) {
-    return null;
-  }
-
-  return `https://discord.com/channels/${GUILD_ID}/${channelId}/${messageId}`;
 }
 
 function formatDiscordTimestamp(timestamp) {
@@ -1445,159 +1267,7 @@ client.once("clientReady", async () => {
   console.log("Bot is online");
 
   const guild = await client.guilds.fetch(GUILD_ID);
-
-  await guild.commands.create(
-    new SlashCommandBuilder()
-      .setName("verify")
-      .setDescription("Get a verification code for Roblox")
-  );
-
-  await guild.commands.create(
-    new SlashCommandBuilder()
-      .setName("unlink")
-      .setDescription("Unlink a user's Roblox account")
-      .addUserOption(option =>
-        option.setName("user")
-          .setDescription("User to unlink")
-          .setRequired(true)
-      )
-  );
-
-  await guild.commands.create(
-    new SlashCommandBuilder()
-      .setName("getroles")
-      .setDescription("Restore your team roles from Roblox")
-  );
-
-  await guild.commands.create(
-    new SlashCommandBuilder()
-      .setName("groupaccept")
-      .setDescription("Accept a Roblox group join request")
-      .addStringOption(option =>
-        option.setName("robloxid")
-          .setDescription("Roblox User ID")
-          .setRequired(true)
-      )
-      .addStringOption(option =>
-        option.setName("discorduser")
-          .setDescription("Discord @username, mention, or user ID")
-          .setRequired(true)
-      )
-  );
-
-  await guild.commands.create(
-    new SlashCommandBuilder()
-      .setName("wipe")
-      .setDescription("Wipe a Roblox player's data")
-      .addStringOption(option =>
-        option.setName("robloxid")
-          .setDescription("Roblox username or user ID")
-          .setRequired(true)
-      )
-      .addStringOption(option =>
-        option.setName("reason")
-          .setDescription("Optional wipe reason")
-          .setRequired(false)
-      )
-  );
-
-  await guild.commands.create(
-    new SlashCommandBuilder()
-      .setName("unwipe")
-      .setDescription("Clear a Roblox player's pending wipe flag")
-      .addStringOption(option =>
-        option.setName("robloxid")
-          .setDescription("Roblox username or user ID")
-          .setRequired(true)
-      )
-  );
-
-  await guild.commands.create(
-    new SlashCommandBuilder()
-      .setName("restore")
-      .setDescription("Restore a Roblox player's data from a wipe snapshot")
-      .addStringOption(option =>
-        option.setName("robloxid")
-          .setDescription("Roblox username or user ID")
-          .setRequired(true)
-      )
-      .addStringOption(option =>
-        option.setName("snapshot")
-          .setDescription("Snapshot ID or latest")
-          .setRequired(false)
-      )
-  );
-
-  await guild.commands.create(
-    new SlashCommandBuilder()
-      .setName("talents")
-      .setDescription("Look up a Roblox player's saved talents")
-      .addStringOption(option =>
-        option.setName("robloxid")
-          .setDescription("Roblox username or user ID")
-          .setRequired(true)
-      )
-  );
-
-  await guild.commands.create(
-    new SlashCommandBuilder()
-      .setName("postpanel")
-      .setDescription("Open a panel composer for a target channel")
-      .addStringOption(option =>
-        option.setName("channelid")
-          .setDescription("Discord channel ID or channel mention")
-          .setRequired(true)
-      )
-  );
-
-  await guild.commands.create(
-    new SlashCommandBuilder()
-      .setName("editpanel")
-      .setDescription("Edit a previously posted panel")
-      .addStringOption(option =>
-        option.setName("message")
-          .setDescription("Discord message link or channelId:messageId")
-          .setRequired(true)
-      )
-  );
-
-  await guild.commands.create(
-    new SlashCommandBuilder()
-      .setName("postevent")
-      .setDescription("Post an event summary to the event logs channel")
-      .addStringOption(option =>
-        option.setName("eventid")
-          .setDescription("Event ID from Studio")
-          .setRequired(true)
-      )
-  );
-
-  await guild.commands.create(
-    new SlashCommandBuilder()
-      .setName("refreshevent")
-      .setDescription("Refresh a previously posted event summary")
-      .addStringOption(option =>
-        option.setName("eventid")
-          .setDescription("Event ID from Studio")
-          .setRequired(true)
-      )
-  );
-
-  await guild.commands.create(
-    new SlashCommandBuilder()
-      .setName("grouprank")
-      .setDescription("Change a Roblox member's group rank")
-      .addStringOption(option =>
-        option.setName("robloxid")
-          .setDescription("Roblox User ID")
-          .setRequired(true)
-      )
-      .addIntegerOption(option =>
-        option.setName("roleid")
-          .setDescription("Roblox Group Role ID")
-          .setRequired(true)
-      )
-  );
+  await registerSlashCommands(guild);
 });
 
 
@@ -1606,6 +1276,18 @@ client.once("clientReady", async () => {
 // ===============================
 client.on("interactionCreate", async (interaction) => {
   if (interaction.isModalSubmit()) {
+    const handled = await handleEditablePostModalSubmit({
+      interaction,
+      client,
+      getInteractionMember,
+      hasModPermissions,
+    });
+    if (handled) {
+      return;
+    }
+
+    return;
+
     const parsedModal = parseEditablePostModalCustomId(interaction.customId);
     if (!parsedModal) {
       return;
@@ -1917,6 +1599,12 @@ client.on("interactionCreate", async (interaction) => {
   // POST PANEL
   // ===============================
   if (interaction.commandName === "postpanel") {
+    return handlePostPanelCommand({
+      interaction,
+      member,
+      client,
+      hasModPermissions,
+    });
 
     if (!hasModPermissions(member)) {
       return interaction.reply({
@@ -1955,6 +1643,12 @@ client.on("interactionCreate", async (interaction) => {
   // EDIT PANEL
   // ===============================
   if (interaction.commandName === "editpanel") {
+    return handleEditPanelCommand({
+      interaction,
+      member,
+      client,
+      hasModPermissions,
+    });
 
     if (!hasModPermissions(member)) {
       return interaction.reply({
