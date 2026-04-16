@@ -1287,7 +1287,7 @@ async function handleEventSummaryCommand(interaction, mode, member) {
 // ===============================
 // BOT READY
 // ===============================
-client.once("ready", async () => {
+client.once("clientReady", async () => {
   console.log("Bot is online");
 
   const guild = await client.guilds.fetch(GUILD_ID);
