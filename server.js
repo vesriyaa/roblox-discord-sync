@@ -323,24 +323,38 @@ function upsertEventSession(payload) {
   }
 
   const existingSession = eventSessions.get(eventId);
-  const incomingUpdatedAt = parseTimestamp(payload?.updatedAt);
-  if (existingSession && incomingUpdatedAt && incomingUpdatedAt < existingSession.updatedAt) {
+  const incomingSourceUpdatedAt = parseTimestamp(payload?.updatedAt);
+  if (
+    existingSession
+    && incomingSourceUpdatedAt
+    && existingSession.sourceUpdatedAt
+    && incomingSourceUpdatedAt < existingSession.sourceUpdatedAt
+  ) {
     return existingSession;
   }
 
+  const hasActiveFlag = typeof payload?.active === "boolean";
   const incomingParticipants = normalizeEventParticipants(
     payload?.participants ?? payload?.entries ?? payload?.deaths
   );
+  const active = hasActiveFlag
+    ? payload.active === true
+    : existingSession?.active ?? false;
+  const sourceUpdatedAt = incomingSourceUpdatedAt ?? existingSession?.sourceUpdatedAt ?? Date.now();
+  const localUpdatedAt = existingSession?.localUpdatedAt ?? 0;
+  const explicitEndedAt = parseTimestamp(payload?.endedAt);
 
   const session = {
     eventId,
     mapName: formatOptionalString(payload?.mapName, existingSession?.mapName || "Unknown Map"),
-    active: payload?.active === true,
+    active,
     startedAt: parseTimestamp(payload?.startedAt) ?? existingSession?.startedAt ?? Date.now(),
-    endedAt: payload?.active === true
+    endedAt: active
       ? null
-      : parseTimestamp(payload?.endedAt) ?? existingSession?.endedAt ?? Date.now(),
-    updatedAt: incomingUpdatedAt ?? Date.now(),
+      : explicitEndedAt ?? existingSession?.endedAt ?? (hasActiveFlag ? Date.now() : null),
+    sourceUpdatedAt,
+    localUpdatedAt,
+    updatedAt: Math.max(sourceUpdatedAt, localUpdatedAt),
     resources: normalizeEventResources(payload?.resources, existingSession?.resources),
     participants: mergeEventParticipants(incomingParticipants, existingSession?.participants),
     eventAnnouncement: existingSession?.eventAnnouncement || null,
@@ -408,7 +422,8 @@ async function syncResolvedEventParticipant(record) {
     participant.snapshotId = snapshotId;
   }
 
-  session.updatedAt = Math.max(session.updatedAt || 0, resolvedAt);
+  session.localUpdatedAt = resolvedAt;
+  session.updatedAt = Math.max(session.sourceUpdatedAt || 0, resolvedAt);
   trackEventSessionOrder(session.eventId);
 
   if (!client.isReady()) {
@@ -502,6 +517,7 @@ function buildEventStatusMessage(session) {
     `Map: **${session.mapName}**`,
     `Status: **${session.active ? "Active" : "Ended"}**`,
     `Started: ${formatDiscordTimestamp(session.startedAt)}`,
+    `Ended: ${session.active ? "Pending" : formatDiscordTimestamp(session.endedAt)}`,
     `Last Update: ${formatDiscordTimestamp(session.updatedAt)}`,
     `Summary Command: \`/postevent eventid:${session.eventId}\``,
   ].join("\n");
