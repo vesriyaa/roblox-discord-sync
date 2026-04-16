@@ -4,8 +4,12 @@ const {
   ButtonBuilder,
   ButtonStyle,
   Client,
+  EmbedBuilder,
   GatewayIntentBits,
+  ModalBuilder,
   SlashCommandBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require("discord.js");
 
 const app = express();
@@ -38,6 +42,9 @@ const BOT_TRANSCRIPTS_CHANNEL_ID = "1493921133605683322";
 const EVENT_LOGS_CHANNEL_ID = "1493925383706513419";
 const EVENT_STATUS_CHANNEL_ID = "1493917062953701407";
 const TALENTS_CHANNEL_ID = "1493382684217577472";
+const EDITABLE_POST_MODAL_PREFIX = "editablePost";
+const EDITABLE_POST_TITLE_FIELD_ID = "title";
+const EDITABLE_POST_BODY_FIELD_ID = "body";
 
 // 🔹 Team → Role mapping
 const roleMap = {
@@ -207,6 +214,151 @@ function parsePositiveInteger(value) {
 function parseTimestamp(value) {
   const parsedValue = Number(value);
   return Number.isFinite(parsedValue) && parsedValue > 0 ? Math.floor(parsedValue) : null;
+}
+
+function parseChannelIdInput(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmedValue = value.trim();
+  if (/^\d+$/.test(trimmedValue)) {
+    return trimmedValue;
+  }
+
+  const mentionMatch = trimmedValue.match(/^<#(\d+)>$/);
+  return mentionMatch?.[1] ?? null;
+}
+
+function parseEditableMessageReference(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmedValue = value.trim();
+  const urlMatch = trimmedValue.match(/^https?:\/\/(?:canary\.|ptb\.)?discord\.com\/channels\/(\d+)\/(\d+)\/(\d+)$/);
+  if (urlMatch) {
+    const [, guildId, channelId, messageId] = urlMatch;
+    return { guildId, channelId, messageId };
+  }
+
+  const shorthandMatch = trimmedValue.match(/^(\d+)\s*[:/]\s*(\d+)$/);
+  if (shorthandMatch) {
+    const [, channelId, messageId] = shorthandMatch;
+    return { guildId: GUILD_ID, channelId, messageId };
+  }
+
+  return null;
+}
+
+function parseEditablePostModalCustomId(customId) {
+  const [prefix, mode, channelId, messageId] = String(customId || "").split("|");
+  if (prefix !== EDITABLE_POST_MODAL_PREFIX || !mode || !channelId) {
+    return null;
+  }
+
+  if (mode === "create") {
+    return { mode, channelId, messageId: null };
+  }
+
+  if (mode === "edit" && messageId) {
+    return { mode, channelId, messageId };
+  }
+
+  return null;
+}
+
+function clampModalValue(value, maxLength) {
+  const normalizedValue = formatOptionalString(value);
+  if (!normalizedValue) {
+    return "";
+  }
+
+  return normalizedValue.length > maxLength
+    ? normalizedValue.slice(0, maxLength)
+    : normalizedValue;
+}
+
+function buildEditablePostEmbed(title, body) {
+  return new EmbedBuilder()
+    .setTitle(title)
+    .setDescription(body);
+}
+
+function buildEditablePostModal(customId, initialValues = {}) {
+  const titleInput = new TextInputBuilder()
+    .setCustomId(EDITABLE_POST_TITLE_FIELD_ID)
+    .setLabel("Title")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(256);
+
+  const bodyInput = new TextInputBuilder()
+    .setCustomId(EDITABLE_POST_BODY_FIELD_ID)
+    .setLabel("Body")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMaxLength(4000);
+
+  const initialTitle = clampModalValue(initialValues.title, 256);
+  if (initialTitle) {
+    titleInput.setValue(initialTitle);
+  }
+
+  const initialBody = clampModalValue(initialValues.body, 4000);
+  if (initialBody) {
+    bodyInput.setValue(initialBody);
+  }
+
+  return new ModalBuilder()
+    .setCustomId(customId)
+    .setTitle(initialValues.mode === "edit" ? "Edit Panel" : "Create Panel")
+    .addComponents(
+      new ActionRowBuilder().addComponents(titleInput),
+      new ActionRowBuilder().addComponents(bodyInput),
+    );
+}
+
+async function fetchTargetChannel(channelId) {
+  const channel = await client.channels.fetch(channelId);
+  if (!channel || typeof channel.send !== "function") {
+    throw new Error("That channel is unavailable or cannot receive messages.");
+  }
+
+  if (channel.guildId && channel.guildId !== GUILD_ID) {
+    throw new Error("That channel is not in the configured guild.");
+  }
+
+  return channel;
+}
+
+async function fetchEditableBotMessage(channelId, messageId) {
+  const channel = await fetchTargetChannel(channelId);
+  if (!channel.messages?.fetch) {
+    throw new Error("That channel does not support message editing.");
+  }
+
+  const message = await channel.messages.fetch(messageId);
+  if (!message) {
+    throw new Error("That message could not be found.");
+  }
+
+  if (message.author?.id !== client.user?.id) {
+    throw new Error("I can only edit messages that I posted.");
+  }
+
+  return { channel, message };
+}
+
+function getEditablePostInitialValues(message) {
+  const primaryEmbed = Array.isArray(message?.embeds) ? message.embeds[0] : null;
+  const title = formatOptionalString(primaryEmbed?.title);
+  const body = formatOptionalString(primaryEmbed?.description);
+
+  return {
+    title,
+    body,
+  };
 }
 
 function normalizeEventResources(resources, existingResources = {}) {
@@ -1389,6 +1541,28 @@ client.once("clientReady", async () => {
 
   await guild.commands.create(
     new SlashCommandBuilder()
+      .setName("postpanel")
+      .setDescription("Open a panel composer for a target channel")
+      .addStringOption(option =>
+        option.setName("channelid")
+          .setDescription("Discord channel ID or channel mention")
+          .setRequired(true)
+      )
+  );
+
+  await guild.commands.create(
+    new SlashCommandBuilder()
+      .setName("editpanel")
+      .setDescription("Edit a previously posted panel")
+      .addStringOption(option =>
+        option.setName("message")
+          .setDescription("Discord message link or channelId:messageId")
+          .setRequired(true)
+      )
+  );
+
+  await guild.commands.create(
+    new SlashCommandBuilder()
       .setName("postevent")
       .setDescription("Post an event summary to the event logs channel")
       .addStringOption(option =>
@@ -1431,6 +1605,61 @@ client.once("clientReady", async () => {
 // SLASH COMMAND HANDLER
 // ===============================
 client.on("interactionCreate", async (interaction) => {
+  if (interaction.isModalSubmit()) {
+    const parsedModal = parseEditablePostModalCustomId(interaction.customId);
+    if (!parsedModal) {
+      return;
+    }
+
+    const { member } = await getInteractionMember(interaction);
+    if (!hasModPermissions(member)) {
+      return interaction.reply({
+        content: "You do not have permission to use this action.",
+        ephemeral: true,
+      });
+    }
+
+    const title = formatOptionalString(interaction.fields.getTextInputValue(EDITABLE_POST_TITLE_FIELD_ID));
+    const body = formatOptionalString(interaction.fields.getTextInputValue(EDITABLE_POST_BODY_FIELD_ID));
+    if (!title || !body) {
+      return interaction.reply({
+        content: "Title and body are both required.",
+        ephemeral: true,
+      });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    try {
+      const embed = buildEditablePostEmbed(title, body);
+
+      if (parsedModal.mode === "create") {
+        const channel = await fetchTargetChannel(parsedModal.channelId);
+        const message = await channel.send({
+          embeds: [embed],
+        });
+
+        const messageUrl = buildDiscordMessageUrl(message.channelId, message.id);
+        return interaction.editReply(messageUrl
+          ? `Posted panel: ${messageUrl}`
+          : `Posted panel in <#${parsedModal.channelId}>.`);
+      }
+
+      const { message } = await fetchEditableBotMessage(parsedModal.channelId, parsedModal.messageId);
+      const updatedMessage = await message.edit({
+        embeds: [embed],
+      });
+
+      const messageUrl = buildDiscordMessageUrl(updatedMessage.channelId, updatedMessage.id);
+      return interaction.editReply(messageUrl
+        ? `Updated panel: ${messageUrl}`
+        : "Updated that panel.");
+    } catch (err) {
+      console.error("Editable panel modal error:", err);
+      return interaction.editReply(`❌ ${err.message || "Failed to save that panel."}`);
+    }
+  }
+
   if (interaction.isButton()) {
     const { member } = await getInteractionMember(interaction);
     if (!hasModPermissions(member)) {
@@ -1682,6 +1911,94 @@ client.on("interactionCreate", async (interaction) => {
       requestedById: interaction.user.id,
       requestedByTag: interaction.user.tag,
     });
+  }
+
+  // ===============================
+  // POST PANEL
+  // ===============================
+  if (interaction.commandName === "postpanel") {
+
+    if (!hasModPermissions(member)) {
+      return interaction.reply({
+        content: "âŒ You do not have permission.",
+        ephemeral: true,
+      });
+    }
+
+    const channelIdInput = interaction.options.getString("channelid");
+    const channelId = parseChannelIdInput(channelIdInput);
+    if (!channelId) {
+      return interaction.reply({
+        content: "âŒ Enter a valid channel ID or channel mention.",
+        ephemeral: true,
+      });
+    }
+
+    try {
+      await fetchTargetChannel(channelId);
+      return interaction.showModal(
+        buildEditablePostModal(
+          `${EDITABLE_POST_MODAL_PREFIX}|create|${channelId}`,
+          { mode: "create" }
+        )
+      );
+    } catch (err) {
+      console.error("Post panel command error:", err);
+      return interaction.reply({
+        content: `âŒ ${err.message || "That channel could not be used."}`,
+        ephemeral: true,
+      });
+    }
+  }
+
+  // ===============================
+  // EDIT PANEL
+  // ===============================
+  if (interaction.commandName === "editpanel") {
+
+    if (!hasModPermissions(member)) {
+      return interaction.reply({
+        content: "âŒ You do not have permission.",
+        ephemeral: true,
+      });
+    }
+
+    const messageInput = interaction.options.getString("message");
+    const reference = parseEditableMessageReference(messageInput);
+    if (!reference) {
+      return interaction.reply({
+        content: "âŒ Use a Discord message link or channelId:messageId.",
+        ephemeral: true,
+      });
+    }
+
+    if (reference.guildId !== GUILD_ID) {
+      return interaction.reply({
+        content: "âŒ That message is not from this server.",
+        ephemeral: true,
+      });
+    }
+
+    try {
+      const { message } = await fetchEditableBotMessage(reference.channelId, reference.messageId);
+      const initialValues = getEditablePostInitialValues(message);
+      return interaction.showModal(
+        buildEditablePostModal(
+          `${EDITABLE_POST_MODAL_PREFIX}|edit|${reference.channelId}|${reference.messageId}`,
+          {
+            mode: "edit",
+            title: initialValues.title,
+            body: initialValues.body,
+          }
+        )
+      );
+    } catch (err) {
+      console.error("Edit panel command error:", err);
+      return interaction.reply({
+        content: `âŒ ${err.message || "That message could not be edited."}`,
+        ephemeral: true,
+      });
+    }
   }
 
   // ===============================
