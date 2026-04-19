@@ -501,7 +501,9 @@ function createSpreadsheetPermissionService(options = {}) {
 
         state.records = records;
         state.lastFetchedAt = Date.now();
-        state.lastError = null;
+        state.lastError = typeof payload?.error === "string" && payload.error.trim()
+          ? payload.error.trim()
+          : null;
         return state.records;
       } catch (error) {
         state.lastFetchedAt = Date.now();
@@ -536,7 +538,11 @@ function createSpreadsheetPermissionService(options = {}) {
   }
 
   async function getMemberAccess(member) {
-    await refreshRecords(false);
+    if (state.records.length === 0) {
+      await refreshRecords(false);
+    } else {
+      void refreshRecords(false);
+    }
 
     const matchingRecords = state.records
       .filter((record) => doesRecordMatchMember(record, member))
@@ -569,6 +575,8 @@ function createSpreadsheetPermissionService(options = {}) {
     hasConfiguredUrl,
     isStrictMode: () => config.strictMode,
     normalizeCommandKey,
+    refreshNow: () => refreshRecords(true),
+    getLastError: () => state.lastError,
   };
 }
 

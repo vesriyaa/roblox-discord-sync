@@ -82,6 +82,17 @@ const spreadsheetPermissionService = createSpreadsheetPermissionService({
   cacheTtlMs: ADMIN_SHEET_CACHE_TTL_MS,
   strictMode: ADMIN_SHEET_STRICT,
 });
+const EAGER_DEFERRED_COMMANDS = new Set([
+  "unlink",
+  "groupaccept",
+  "wipe",
+  "unwipe",
+  "restore",
+  "talents",
+  "postevent",
+  "refreshevent",
+  "grouprank",
+]);
 // 🔹 ROLE IDS
 // 🔹 DISCORD ROLE SWAP
 // 🔹 Team → Role mapping
@@ -134,6 +145,14 @@ function sendInteractionResponse(interaction, content) {
     content,
     ephemeral: true
   });
+}
+
+async function ensureEphemeralDefer(interaction) {
+  if (interaction.deferred || interaction.replied) {
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
 }
 
 function createVerificationRequest(interaction) {
@@ -1239,7 +1258,7 @@ async function getInteractionMember(interaction) {
 }
 
 async function handleQueuedAdminAction(interaction, actionData) {
-  await interaction.deferReply({ ephemeral: true });
+  await ensureEphemeralDefer(interaction);
 
   const { duplicate, record } = queueAdminAction(actionData);
 
@@ -1267,7 +1286,7 @@ async function handleQueuedAdminAction(interaction, actionData) {
 }
 
 async function handleQueuedTalentLookup(interaction, lookupData) {
-  await interaction.deferReply({ ephemeral: true });
+  await ensureEphemeralDefer(interaction);
 
   const record = queueTalentLookup(lookupData);
   const completedRecord = await waitForTalentLookupCompletion(record.id, TALENT_LOOKUP_WAIT_TIMEOUT_MS);
@@ -1291,6 +1310,8 @@ async function handleQueuedTalentLookup(interaction, lookupData) {
 }
 
 async function handleEventSummaryCommand(interaction, mode, member) {
+  await ensureEphemeralDefer(interaction);
+
   if (!await ensureAdminPermission(interaction, member, mode === "refresh" ? "refreshevent" : "postevent")) {
     return;
   }
@@ -1303,8 +1324,6 @@ async function handleEventSummaryCommand(interaction, mode, member) {
       ephemeral: true,
     });
   }
-
-  await interaction.deferReply({ ephemeral: true });
 
   try {
     const message = mode === "refresh"
@@ -1330,6 +1349,29 @@ client.once("clientReady", async () => {
 
   const guild = await client.guilds.fetch(GUILD_ID);
   await registerSlashCommands(guild);
+
+  try {
+    await spreadsheetPermissionService.refreshNow();
+    const permissionSheetError = spreadsheetPermissionService.getLastError?.();
+    if (permissionSheetError) {
+      console.warn("Spreadsheet permission warmup warning:", permissionSheetError);
+    }
+  } catch (err) {
+    console.error("Spreadsheet permission warmup error:", err);
+  }
+
+  const refreshIntervalMs = Math.max(ADMIN_SHEET_CACHE_TTL_MS || 180000, 30000);
+  setInterval(async () => {
+    try {
+      await spreadsheetPermissionService.refreshNow();
+      const permissionSheetError = spreadsheetPermissionService.getLastError?.();
+      if (permissionSheetError) {
+        console.warn("Spreadsheet permission refresh warning:", permissionSheetError);
+      }
+    } catch (err) {
+      console.error("Spreadsheet permission refresh error:", err);
+    }
+  }, refreshIntervalMs).unref();
 });
 
 
@@ -1337,6 +1379,7 @@ client.once("clientReady", async () => {
 // SLASH COMMAND HANDLER
 // ===============================
 client.on("interactionCreate", async (interaction) => {
+  try {
   if (interaction.isModalSubmit()) {
     const handled = await handleEditablePostModalSubmit({
       interaction,
@@ -1358,6 +1401,7 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
+    await ensureEphemeralDefer(interaction);
     const { member } = await getInteractionMember(interaction);
     if (!await ensureAdminPermission(interaction, member, parsedAction.actionType, "You do not have permission to use this action.")) {
       return;
@@ -1378,6 +1422,9 @@ client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   const { guild, member } = await getInteractionMember(interaction);
+  if (EAGER_DEFERRED_COMMANDS.has(interaction.commandName)) {
+    await ensureEphemeralDefer(interaction);
+  }
 
   // ===============================
   // VERIFY
@@ -1413,7 +1460,7 @@ client.on("interactionCreate", async (interaction) => {
     const targetMember = await guild.members.fetch(targetUser.id);
 
     try {
-      await interaction.deferReply({ ephemeral: true });
+      await ensureEphemeralDefer(interaction);
 
       if (targetMember.roles.cache.has(VERIFIED_ROLE_ID)) {
         await targetMember.roles.remove(VERIFIED_ROLE_ID);
@@ -1456,7 +1503,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     try {
-      await interaction.deferReply({ ephemeral: true });
+      await ensureEphemeralDefer(interaction);
 
       const csrfResponse = await fetch("https://auth.roblox.com/v2/logout", {
         method: "POST",
@@ -1632,7 +1679,7 @@ client.on("interactionCreate", async (interaction) => {
     const roleId = interaction.options.getInteger("roleid");
 
     try {
-      await interaction.deferReply({ ephemeral: true });
+      await ensureEphemeralDefer(interaction);
 
       const csrfResponse = await fetch("https://auth.roblox.com/v2/logout", {
         method: "POST",
@@ -1669,6 +1716,16 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 
+  } catch (err) {
+    console.error("Interaction handler error:", err);
+    if (interaction.isRepliable()) {
+      try {
+        await sendInteractionResponse(interaction, "❌ Something went wrong while handling that interaction.");
+      } catch (replyErr) {
+        console.error("Interaction error response failed:", replyErr);
+      }
+    }
+  }
 });
 
 
