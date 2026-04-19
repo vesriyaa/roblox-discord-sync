@@ -16,6 +16,7 @@ const {
   ADMIN_ACTION_CLAIM_TIMEOUT_MS,
   ADMIN_ACTION_RETENTION_MS,
   ADMIN_ACTION_WAIT_TIMEOUT_MS,
+  ANTICHEAT_CHANNEL_ID,
   API_KEY,
   BOT_TOKEN,
   BOT_TRANSCRIPTS_CHANNEL_ID,
@@ -196,6 +197,7 @@ async function sendVerificationCompletionFollowUp(verificationRequest) {
 
 function getRelayChannelId(service) {
   const relayChannels = {
+    anticheat: ANTICHEAT_CHANNEL_ID,
     wipe: WIPE_CHANNEL_ID,
     death: DEATH_CHANNEL_ID,
     examservice: EXAM_SERVICE_CHANNEL_ID,
