@@ -244,7 +244,7 @@ async function handleEditablePostModalSubmit({
   interaction,
   client,
   getInteractionMember,
-  hasModPermissions,
+  hasCommandPermission,
 }) {
   const parsedModal = parseEditablePostModalCustomId(interaction.customId);
   if (!parsedModal) {
@@ -252,7 +252,8 @@ async function handleEditablePostModalSubmit({
   }
 
   const { member } = await getInteractionMember(interaction);
-  if (!hasModPermissions(member)) {
+  const commandName = parsedModal.mode === "create" ? "postpanel" : "editpanel";
+  if (!await hasCommandPermission(member, commandName)) {
     await interaction.reply({
       content: "You do not have permission to use this action.",
       ephemeral: true,
@@ -329,13 +330,10 @@ async function handlePostPanelCommand({
   interaction,
   member,
   client,
-  hasModPermissions,
+  ensureCommandPermission,
 }) {
-  if (!hasModPermissions(member)) {
-    return interaction.reply({
-      content: "❌ You do not have permission.",
-      ephemeral: true,
-    });
+  if (!await ensureCommandPermission(interaction, member, "postpanel")) {
+    return;
   }
 
   const channelIdInput = interaction.options.getString("channelid");
@@ -368,13 +366,10 @@ async function handleEditPanelCommand({
   interaction,
   member,
   client,
-  hasModPermissions,
+  ensureCommandPermission,
 }) {
-  if (!hasModPermissions(member)) {
-    return interaction.reply({
-      content: "❌ You do not have permission.",
-      ephemeral: true,
-    });
+  if (!await ensureCommandPermission(interaction, member, "editpanel")) {
+    return;
   }
 
   const messageInput = interaction.options.getString("message");

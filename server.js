@@ -6,6 +6,12 @@ const {
   Client,
   GatewayIntentBits,
 } = require("discord.js");
+const { createSpreadsheetPermissionService } = require("./spreadsheetPermissions");
+const {
+  canRoleUseStaffCommand,
+  getMinimumRoleForCommand,
+  normalizeCommandKey,
+} = require("./staffCommandMatrix");
 const {
   ADMIN_ACTION_CLAIM_TIMEOUT_MS,
   ADMIN_ACTION_RETENTION_MS,
@@ -65,6 +71,17 @@ const client = new Client({
   ]
 });
 
+const ADMIN_SHEET_URL = process.env.ADMIN_SHEET_URL
+  || process.env.GOOGLE_SHEETS_ADMIN_URL
+  || process.env.SPREADSHEET_ADMIN_URL
+  || "";
+const ADMIN_SHEET_CACHE_TTL_MS = Number.parseInt(process.env.ADMIN_SHEET_CACHE_TTL_MS || "", 10);
+const ADMIN_SHEET_STRICT = String(process.env.ADMIN_SHEET_STRICT || "").toLowerCase() === "true";
+const spreadsheetPermissionService = createSpreadsheetPermissionService({
+  url: ADMIN_SHEET_URL,
+  cacheTtlMs: ADMIN_SHEET_CACHE_TTL_MS,
+  strictMode: ADMIN_SHEET_STRICT,
+});
 // 🔹 ROLE IDS
 // 🔹 DISCORD ROLE SWAP
 // 🔹 Team → Role mapping
@@ -585,6 +602,54 @@ async function refreshEventSummary(session) {
 
 function hasModPermissions(member) {
   return member.roles.cache.has(MOD_ROLE_ID);
+}
+
+async function hasAdminPermissions(member, commandName = "admin") {
+  const access = await spreadsheetPermissionService.getMemberAccess(member);
+  const commandKey = normalizeCommandKey(commandName) || "admin";
+  const minimumRole = getMinimumRoleForCommand(commandKey);
+
+  if (!minimumRole) {
+    return false;
+  }
+
+  const fallbackRole = hasModPermissions(member) ? "Mod" : null;
+
+  if (access.record) {
+    const grantedRole = access.record.botRole || access.record.role;
+    const hasCommandGrant = access.record.allCommands
+      || access.record.commandKeys.includes(commandKey);
+    const hasRoleGrant = canRoleUseStaffCommand(grantedRole, commandKey);
+
+    if (hasCommandGrant || hasRoleGrant) {
+      return true;
+    }
+
+    if (access.strictMode) {
+      return false;
+    }
+  } else if (access.strictMode && access.configured) {
+    return false;
+  }
+
+  return canRoleUseStaffCommand(fallbackRole, commandKey);
+}
+
+async function ensureAdminPermission(interaction, member, commandName, deniedMessage = "❌ You do not have permission.") {
+  if (await hasAdminPermissions(member, commandName)) {
+    return true;
+  }
+
+  if (interaction.deferred || interaction.replied) {
+    await sendInteractionResponse(interaction, deniedMessage);
+  } else {
+    await interaction.reply({
+      content: deniedMessage,
+      ephemeral: true,
+    });
+  }
+
+  return false;
 }
 
 function getEmbedFieldValue(embed, fieldName) {
@@ -1226,11 +1291,8 @@ async function handleQueuedTalentLookup(interaction, lookupData) {
 }
 
 async function handleEventSummaryCommand(interaction, mode, member) {
-  if (!hasModPermissions(member)) {
-    return interaction.reply({
-      content: "❌ You do not have permission.",
-      ephemeral: true,
-    });
+  if (!await ensureAdminPermission(interaction, member, mode === "refresh" ? "refreshevent" : "postevent")) {
+    return;
   }
 
   const eventId = formatOptionalString(interaction.options.getString("eventid"));
@@ -1280,83 +1342,25 @@ client.on("interactionCreate", async (interaction) => {
       interaction,
       client,
       getInteractionMember,
-      hasModPermissions,
+      hasCommandPermission: hasAdminPermissions,
     });
     if (handled) {
       return;
     }
-
-    return;
-
-    const parsedModal = parseEditablePostModalCustomId(interaction.customId);
-    if (!parsedModal) {
-      return;
-    }
-
-    const { member } = await getInteractionMember(interaction);
-    if (!hasModPermissions(member)) {
-      return interaction.reply({
-        content: "You do not have permission to use this action.",
-        ephemeral: true,
-      });
-    }
-
-    const title = formatOptionalString(interaction.fields.getTextInputValue(EDITABLE_POST_TITLE_FIELD_ID));
-    const body = formatOptionalString(interaction.fields.getTextInputValue(EDITABLE_POST_BODY_FIELD_ID));
-    if (!title || !body) {
-      return interaction.reply({
-        content: "Title and body are both required.",
-        ephemeral: true,
-      });
-    }
-
-    await interaction.deferReply({ ephemeral: true });
-
-    try {
-      const embed = buildEditablePostEmbed(title, body);
-
-      if (parsedModal.mode === "create") {
-        const channel = await fetchTargetChannel(parsedModal.channelId);
-        const message = await channel.send({
-          embeds: [embed],
-        });
-
-        const messageUrl = buildDiscordMessageUrl(message.channelId, message.id);
-        return interaction.editReply(messageUrl
-          ? `Posted panel: ${messageUrl}`
-          : `Posted panel in <#${parsedModal.channelId}>.`);
-      }
-
-      const { message } = await fetchEditableBotMessage(parsedModal.channelId, parsedModal.messageId);
-      const updatedMessage = await message.edit({
-        embeds: [embed],
-      });
-
-      const messageUrl = buildDiscordMessageUrl(updatedMessage.channelId, updatedMessage.id);
-      return interaction.editReply(messageUrl
-        ? `Updated panel: ${messageUrl}`
-        : "Updated that panel.");
-    } catch (err) {
-      console.error("Editable panel modal error:", err);
-      return interaction.editReply(`❌ ${err.message || "Failed to save that panel."}`);
-    }
   }
 
   if (interaction.isButton()) {
-    const { member } = await getInteractionMember(interaction);
-    if (!hasModPermissions(member)) {
-      return interaction.reply({
-        content: "You do not have permission to use this action.",
-        ephemeral: true,
-      });
-    }
-
     const parsedAction = parseAdminActionCustomId(interaction.customId);
     if (!parsedAction) {
       return interaction.reply({
         content: "That action button is invalid.",
         ephemeral: true,
       });
+    }
+
+    const { member } = await getInteractionMember(interaction);
+    if (!await ensureAdminPermission(interaction, member, parsedAction.actionType, "You do not have permission to use this action.")) {
+      return;
     }
 
     return handleQueuedAdminAction(interaction, {
@@ -1401,11 +1405,8 @@ client.on("interactionCreate", async (interaction) => {
   // ===============================
   if (interaction.commandName === "unlink") {
 
-    if (!member.roles.cache.has(MOD_ROLE_ID)) {
-      return interaction.reply({
-        content: "❌ You do not have permission to use this command.",
-        ephemeral: true
-      });
+    if (!await ensureAdminPermission(interaction, member, "unlink", "❌ You do not have permission to use this command.")) {
+      return;
     }
 
     const targetUser = interaction.options.getUser("user");
@@ -1439,11 +1440,8 @@ client.on("interactionCreate", async (interaction) => {
   // ===============================
   if (interaction.commandName === "groupaccept") {
 
-    if (!member.roles.cache.has(MOD_ROLE_ID)) {
-      return interaction.reply({
-        content: "❌ You do not have permission.",
-        ephemeral: true
-      });
+    if (!await ensureAdminPermission(interaction, member, "groupaccept")) {
+    return;
     }
 
     const robloxId = interaction.options.getString("robloxid");
@@ -1506,11 +1504,8 @@ client.on("interactionCreate", async (interaction) => {
   // ===============================
   if (interaction.commandName === "wipe") {
 
-    if (!hasModPermissions(member)) {
-      return interaction.reply({
-        content: "❌ You do not have permission.",
-        ephemeral: true
-      });
+    if (!await ensureAdminPermission(interaction, member, "wipe")) {
+    return;
     }
 
     const robloxInput = interaction.options.getString("robloxid");
@@ -1531,11 +1526,8 @@ client.on("interactionCreate", async (interaction) => {
   // ===============================
   if (interaction.commandName === "unwipe") {
 
-    if (!hasModPermissions(member)) {
-      return interaction.reply({
-        content: "❌ You do not have permission.",
-        ephemeral: true
-      });
+    if (!await ensureAdminPermission(interaction, member, "unwipe")) {
+    return;
     }
 
     const robloxInput = interaction.options.getString("robloxid");
@@ -1554,11 +1546,8 @@ client.on("interactionCreate", async (interaction) => {
   // ===============================
   if (interaction.commandName === "restore") {
 
-    if (!hasModPermissions(member)) {
-      return interaction.reply({
-        content: "❌ You do not have permission.",
-        ephemeral: true
-      });
+    if (!await ensureAdminPermission(interaction, member, "restore")) {
+    return;
     }
 
     const robloxInput = interaction.options.getString("robloxid");
@@ -1579,11 +1568,8 @@ client.on("interactionCreate", async (interaction) => {
   // ===============================
   if (interaction.commandName === "talents") {
 
-    if (!hasModPermissions(member)) {
-      return interaction.reply({
-        content: "❌ You do not have permission.",
-        ephemeral: true,
-      });
+    if (!await ensureAdminPermission(interaction, member, "talents")) {
+    return;
     }
 
     const robloxInput = interaction.options.getString("robloxid");
@@ -1603,40 +1589,8 @@ client.on("interactionCreate", async (interaction) => {
       interaction,
       member,
       client,
-      hasModPermissions,
+      ensureCommandPermission: ensureAdminPermission,
     });
-
-    if (!hasModPermissions(member)) {
-      return interaction.reply({
-        content: "âŒ You do not have permission.",
-        ephemeral: true,
-      });
-    }
-
-    const channelIdInput = interaction.options.getString("channelid");
-    const channelId = parseChannelIdInput(channelIdInput);
-    if (!channelId) {
-      return interaction.reply({
-        content: "âŒ Enter a valid channel ID or channel mention.",
-        ephemeral: true,
-      });
-    }
-
-    try {
-      await fetchTargetChannel(channelId);
-      return interaction.showModal(
-        buildEditablePostModal(
-          `${EDITABLE_POST_MODAL_PREFIX}|create|${channelId}`,
-          { mode: "create" }
-        )
-      );
-    } catch (err) {
-      console.error("Post panel command error:", err);
-      return interaction.reply({
-        content: `âŒ ${err.message || "That channel could not be used."}`,
-        ephemeral: true,
-      });
-    }
   }
 
   // ===============================
@@ -1647,52 +1601,8 @@ client.on("interactionCreate", async (interaction) => {
       interaction,
       member,
       client,
-      hasModPermissions,
+      ensureCommandPermission: ensureAdminPermission,
     });
-
-    if (!hasModPermissions(member)) {
-      return interaction.reply({
-        content: "âŒ You do not have permission.",
-        ephemeral: true,
-      });
-    }
-
-    const messageInput = interaction.options.getString("message");
-    const reference = parseEditableMessageReference(messageInput);
-    if (!reference) {
-      return interaction.reply({
-        content: "âŒ Use a Discord message link or channelId:messageId.",
-        ephemeral: true,
-      });
-    }
-
-    if (reference.guildId !== GUILD_ID) {
-      return interaction.reply({
-        content: "âŒ That message is not from this server.",
-        ephemeral: true,
-      });
-    }
-
-    try {
-      const { message } = await fetchEditableBotMessage(reference.channelId, reference.messageId);
-      const initialValues = getEditablePostInitialValues(message);
-      return interaction.showModal(
-        buildEditablePostModal(
-          `${EDITABLE_POST_MODAL_PREFIX}|edit|${reference.channelId}|${reference.messageId}`,
-          {
-            mode: "edit",
-            title: initialValues.title,
-            body: initialValues.body,
-          }
-        )
-      );
-    } catch (err) {
-      console.error("Edit panel command error:", err);
-      return interaction.reply({
-        content: `âŒ ${err.message || "That message could not be edited."}`,
-        ephemeral: true,
-      });
-    }
   }
 
   // ===============================
@@ -1714,11 +1624,8 @@ client.on("interactionCreate", async (interaction) => {
   // ===============================
   if (interaction.commandName === "grouprank") {
 
-    if (!member.roles.cache.has(MOD_ROLE_ID)) {
-      return interaction.reply({
-        content: "❌ You do not have permission.",
-        ephemeral: true
-      });
+    if (!await ensureAdminPermission(interaction, member, "grouprank")) {
+    return;
     }
 
     const robloxId = interaction.options.getString("robloxid");
@@ -2074,6 +1981,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running");
 });
+
 
 
 
