@@ -94,6 +94,8 @@ const EAGER_DEFERRED_COMMANDS = new Set([
   "refreshevent",
   "grouprank",
 ]);
+const MEMBER_COMMAND_ROLE_ID = process.env.MEMBER_COMMAND_ROLE_ID || "1415902349192331383";
+const MEMBER_ALLOWED_COMMANDS = new Set(["verify", "getroles"]);
 // 🔹 ROLE IDS
 // 🔹 DISCORD ROLE SWAP
 // 🔹 Team → Role mapping
@@ -623,6 +625,26 @@ async function refreshEventSummary(session) {
 
 function hasModPermissions(member) {
   return member.roles.cache.has(MOD_ROLE_ID);
+}
+
+function hasMemberCommandRole(member) {
+  return Boolean(MEMBER_COMMAND_ROLE_ID && member.roles.cache.has(MEMBER_COMMAND_ROLE_ID));
+}
+
+async function ensureChatInputCommandAccess(interaction, member) {
+  const commandKey = normalizeCommandKey(interaction.commandName);
+  const access = await spreadsheetPermissionService.getMemberAccess(member);
+
+  if (access.record || hasModPermissions(member)) {
+    return true;
+  }
+
+  if (MEMBER_ALLOWED_COMMANDS.has(commandKey) && hasMemberCommandRole(member)) {
+    return true;
+  }
+
+  await sendInteractionResponse(interaction, "❌ You do not have permission to use this command.");
+  return false;
 }
 
 async function hasAdminPermissions(member, commandName = "admin") {
@@ -1428,6 +1450,10 @@ client.on("interactionCreate", async (interaction) => {
     await ensureEphemeralDefer(interaction);
   }
 
+  if (!await ensureChatInputCommandAccess(interaction, member)) {
+    return;
+  }
+
   // ===============================
   // VERIFY
   // ===============================
@@ -1445,6 +1471,23 @@ client.on("interactionCreate", async (interaction) => {
 
     return interaction.reply({
       content: `Your verification code is: **${code}**\nEnter this in-game.`,
+      ephemeral: true
+    });
+  }
+
+  // ===============================
+  // GET ROLES
+  // ===============================
+  if (interaction.commandName === "getroles") {
+    if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
+      return interaction.reply({
+        content: "❌ You need to verify before restoring roles. Use /verify first.",
+        ephemeral: true
+      });
+    }
+
+    return interaction.reply({
+      content: "✅ Your roles sync from your in-game team. If a team role is missing, join the game and let it refresh your team once.",
       ephemeral: true
     });
   }

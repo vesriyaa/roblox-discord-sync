@@ -132,9 +132,7 @@ function buildSlashCommands() {
 }
 
 async function registerSlashCommands(guild) {
-  for (const command of buildSlashCommands()) {
-    await guild.commands.create(command);
-  }
+  await guild.commands.set(buildSlashCommands());
 }
 
 module.exports = {
