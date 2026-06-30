@@ -220,7 +220,7 @@ function buildRobloxAuthorizeUrl(session) {
 function buildVerificationPanelPayload() {
   const embed = new EmbedBuilder()
     .setTitle("Verification System")
-    .setDescription("Welcome to Verfall! Click the button below to verify your account and unlock all channels.")
+    .setDescription("Welcome to Thornvale! Click the button below to verify your account and unlock all channels.")
     .setColor(0x2fb8df)
     .setFooter({ text: "Verification System" })
     .setTimestamp(new Date());
