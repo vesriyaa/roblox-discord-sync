@@ -24,6 +24,7 @@ const STAFF_COMMANDS_BY_ROLE = {
   Admin: [
     "groupaccept",
     "grouprank",
+    "inactivecheck",
   ],
   Owner: [
     "*",

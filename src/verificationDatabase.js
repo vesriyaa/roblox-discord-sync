@@ -32,6 +32,9 @@ function normalizeLink(row) {
     robloxDisplayName: row.roblox_display_name || "",
     verifiedAt: toIso(row.verified_at),
     updatedAt: toIso(row.updated_at),
+    lastGameSeenAt: toIso(row.last_game_seen_at),
+    lastGameJoinedAt: toIso(row.last_game_joined_at),
+    lastGameLeftAt: toIso(row.last_game_left_at),
   };
 }
 
@@ -124,10 +127,56 @@ function createMemoryStore() {
         robloxDisplayName: link.robloxDisplayName || "",
         verifiedAt: previous?.verifiedAt || nowIso(),
         updatedAt: nowIso(),
+        lastGameSeenAt: previous?.lastGameSeenAt || nowIso(),
+        lastGameJoinedAt: previous?.lastGameJoinedAt || null,
+        lastGameLeftAt: previous?.lastGameLeftAt || null,
       };
       linksByDiscord.set(discordId, record);
       linksByRoblox.set(robloxUserId, record);
       return record;
+    },
+    async recordGameActivity(activity) {
+      const robloxUserId = String(activity?.robloxUserId || "");
+      const existing = linksByRoblox.get(robloxUserId);
+      if (!existing) {
+        return null;
+      }
+
+      const timestamp = nowIso();
+      existing.updatedAt = timestamp;
+      existing.lastGameSeenAt = timestamp;
+      if (activity.eventType === "join") {
+        existing.lastGameJoinedAt = timestamp;
+      } else if (activity.eventType === "leave") {
+        existing.lastGameLeftAt = timestamp;
+      }
+      if (activity.robloxUsername) {
+        existing.robloxUsername = activity.robloxUsername;
+      }
+      if (activity.robloxDisplayName) {
+        existing.robloxDisplayName = activity.robloxDisplayName;
+      }
+      return existing;
+    },
+    async listInactiveCandidates(cutoffIso, limit) {
+      return Array.from(linksByDiscord.values())
+        .filter((record) => record.lastGameSeenAt && new Date(record.lastGameSeenAt) <= new Date(cutoffIso))
+        .sort((left, right) => new Date(left.lastGameSeenAt) - new Date(right.lastGameSeenAt))
+        .slice(0, limit);
+    },
+    async listNearlyInactiveCandidates(nearCutoffIso, inactiveCutoffIso, limit) {
+      const nearCutoff = new Date(nearCutoffIso);
+      const inactiveCutoff = new Date(inactiveCutoffIso);
+      return Array.from(linksByDiscord.values())
+        .filter((record) => {
+          if (!record.lastGameSeenAt) {
+            return false;
+          }
+          const lastSeen = new Date(record.lastGameSeenAt);
+          return lastSeen > inactiveCutoff && lastSeen <= nearCutoff;
+        })
+        .sort((left, right) => new Date(left.lastGameSeenAt) - new Date(right.lastGameSeenAt))
+        .slice(0, limit);
     },
     async deleteVerificationByDiscordId(discordId) {
       const key = String(discordId);
@@ -166,6 +215,11 @@ function createPostgresStore() {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
+
+      await query("ALTER TABLE roblox_discord_links ADD COLUMN IF NOT EXISTS last_game_seen_at TIMESTAMPTZ");
+      await query("ALTER TABLE roblox_discord_links ADD COLUMN IF NOT EXISTS last_game_joined_at TIMESTAMPTZ");
+      await query("ALTER TABLE roblox_discord_links ADD COLUMN IF NOT EXISTS last_game_left_at TIMESTAMPTZ");
+      await query("UPDATE roblox_discord_links SET last_game_seen_at = NOW() WHERE last_game_seen_at IS NULL");
 
       await query(`
         CREATE TABLE IF NOT EXISTS roblox_oauth_sessions (
@@ -244,14 +298,16 @@ function createPostgresStore() {
             discord_id,
             roblox_user_id,
             roblox_username,
-            roblox_display_name
+            roblox_display_name,
+            last_game_seen_at
           )
-          VALUES ($1, $2, $3, $4)
+          VALUES ($1, $2, $3, $4, NOW())
           ON CONFLICT (discord_id)
           DO UPDATE SET
             roblox_user_id = EXCLUDED.roblox_user_id,
             roblox_username = EXCLUDED.roblox_username,
             roblox_display_name = EXCLUDED.roblox_display_name,
+            last_game_seen_at = COALESCE(roblox_discord_links.last_game_seen_at, NOW()),
             updated_at = NOW()
           RETURNING *
         `,
@@ -263,6 +319,57 @@ function createPostgresStore() {
         ]
       );
       return normalizeLink(result.rows[0]);
+    },
+    async recordGameActivity(activity) {
+      const eventType = String(activity?.eventType || "").toLowerCase();
+      const result = await query(
+        `
+          UPDATE roblox_discord_links
+          SET
+            roblox_username = COALESCE(NULLIF($2, ''), roblox_username),
+            roblox_display_name = COALESCE(NULLIF($3, ''), roblox_display_name),
+            last_game_seen_at = NOW(),
+            last_game_joined_at = CASE WHEN $4 = 'join' THEN NOW() ELSE last_game_joined_at END,
+            last_game_left_at = CASE WHEN $4 = 'leave' THEN NOW() ELSE last_game_left_at END,
+            updated_at = NOW()
+          WHERE roblox_user_id = $1
+          RETURNING *
+        `,
+        [
+          String(activity?.robloxUserId || ""),
+          activity?.robloxUsername || "",
+          activity?.robloxDisplayName || "",
+          eventType,
+        ]
+      );
+      return normalizeLink(result.rows[0]);
+    },
+    async listInactiveCandidates(cutoffIso, limit) {
+      const result = await query(
+        `
+          SELECT *
+          FROM roblox_discord_links
+          WHERE last_game_seen_at <= $1
+          ORDER BY last_game_seen_at ASC
+          LIMIT $2
+        `,
+        [cutoffIso, limit]
+      );
+      return result.rows.map(normalizeLink);
+    },
+    async listNearlyInactiveCandidates(nearCutoffIso, inactiveCutoffIso, limit) {
+      const result = await query(
+        `
+          SELECT *
+          FROM roblox_discord_links
+          WHERE last_game_seen_at > $2
+            AND last_game_seen_at <= $1
+          ORDER BY last_game_seen_at ASC
+          LIMIT $3
+        `,
+        [nearCutoffIso, inactiveCutoffIso, limit]
+      );
+      return result.rows.map(normalizeLink);
     },
     async deleteVerificationByDiscordId(discordId) {
       const result = await query(

@@ -30,6 +30,11 @@ const {
   EXAM_SERVICE_CHANNEL_ID,
   GROUP_ID,
   GUILD_ID,
+  INACTIVITY_CONFIRM_LIMIT,
+  INACTIVITY_DAYS,
+  INACTIVITY_EXEMPT_ROLE_IDS,
+  INACTIVITY_MAX_LIMIT,
+  INACTIVITY_NEAR_DAYS,
   INTERACTION_FOLLOW_UP_WINDOW_MS,
   MOD_ROLE_ID,
   PUBLIC_BASE_URL,
@@ -41,6 +46,7 @@ const {
   TALENT_LOOKUP_CLAIM_TIMEOUT_MS,
   TALENT_LOOKUP_RETENTION_MS,
   TALENT_LOOKUP_WAIT_TIMEOUT_MS,
+  UNWAVED_ROLE_ID,
   VERIFIED_ROLE_ID,
   VERIFICATION_CHANNEL_ID,
   WALD_ROLE_ID,
@@ -99,6 +105,7 @@ const spreadsheetPermissionService = createSpreadsheetPermissionService({
 const EAGER_DEFERRED_COMMANDS = new Set([
   "unlink",
   "groupaccept",
+  "inactive-check",
   "wipe",
   "unwipe",
   "restore",
@@ -143,13 +150,71 @@ async function resolveDiscordMember(guild, input) {
 }
 
 async function updateGroupAcceptRoles(member) {
-  if (member.roles.cache.has(WALD_ROLE_ID)) {
-    await member.roles.remove(WALD_ROLE_ID);
+  if (member.roles.cache.has(UNWAVED_ROLE_ID)) {
+    await member.roles.remove(UNWAVED_ROLE_ID);
   }
 
   if (!member.roles.cache.has(ENVISIONED_ROLE_ID)) {
     await member.roles.add(ENVISIONED_ROLE_ID);
   }
+}
+
+async function safeSendDm(user, content) {
+  if (!user || typeof user.send !== "function") {
+    return false;
+  }
+
+  try {
+    await user.send({ content });
+    return true;
+  } catch (err) {
+    console.warn("Failed to send DM:", user.id, err?.message || err);
+    return false;
+  }
+}
+
+function getInactiveRoleRemovalIds() {
+  return Array.from(new Set([
+    VERIFIED_ROLE_ID,
+    ENVISIONED_ROLE_ID,
+    ...Object.values(roleMap),
+  ].filter(Boolean)));
+}
+
+function isMemberInactivityExempt(member) {
+  if (!member) {
+    return false;
+  }
+
+  for (const roleId of INACTIVITY_EXEMPT_ROLE_IDS) {
+    if (member.roles.cache.has(roleId)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function applyInactiveDiscordRoles(member) {
+  if (!member) {
+    return { removed: 0, unwaved: false };
+  }
+
+  const removableRoleIds = getInactiveRoleRemovalIds()
+    .filter((roleId) => roleId !== UNWAVED_ROLE_ID && member.roles.cache.has(roleId));
+
+  if (removableRoleIds.length > 0) {
+    await member.roles.remove(removableRoleIds);
+  }
+
+  if (UNWAVED_ROLE_ID && !member.roles.cache.has(UNWAVED_ROLE_ID)) {
+    await member.roles.add(UNWAVED_ROLE_ID);
+  }
+
+  return {
+    removed: removableRoleIds.length,
+    unwaved: Boolean(UNWAVED_ROLE_ID),
+  };
 }
 
 function sendInteractionResponse(interaction, content) {
@@ -1551,6 +1616,200 @@ async function handleQueuedTalentLookup(interaction, lookupData) {
   return interaction.editReply(`Queued a talent lookup for ${lookupData.targetUserId}. I will post the result in <#${TALENTS_CHANNEL_ID}> once Studio responds.`);
 }
 
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function clampInteger(value, fallback, min, max) {
+  const parsedValue = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsedValue)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, parsedValue));
+}
+
+function getSlashInteger(interaction, name, fallback, min, max) {
+  return clampInteger(interaction.options.getInteger(name), fallback, min, max);
+}
+
+function getInactiveCutoffIso(days, now = Date.now()) {
+  return new Date(now - (days * MS_PER_DAY)).toISOString();
+}
+
+function getDaysSinceIso(iso, now = Date.now()) {
+  const timestamp = new Date(iso).getTime();
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+
+  return Math.max(0, Math.floor((now - timestamp) / MS_PER_DAY));
+}
+
+function formatDiscordTimestamp(iso, style = "R") {
+  const timestamp = new Date(iso).getTime();
+  if (!Number.isFinite(timestamp)) {
+    return "unknown";
+  }
+
+  return `<t:${Math.floor(timestamp / 1000)}:${style}>`;
+}
+
+function formatInactiveCandidate(record, index, now = Date.now()) {
+  const daysSince = getDaysSinceIso(record.lastGameSeenAt, now);
+  const daysText = daysSince == null ? "unknown days" : `${daysSince} day${daysSince === 1 ? "" : "s"}`;
+  const robloxLabel = record.robloxUsername
+    ? `${record.robloxUsername} (${record.robloxUserId})`
+    : record.robloxUserId;
+
+  return `${index + 1}. <@${record.discordId}> | ${robloxLabel} | last seen ${formatDiscordTimestamp(record.lastGameSeenAt)} (${daysText})`;
+}
+
+function formatNearInactiveCandidate(record, index, days) {
+  const lastSeen = new Date(record.lastGameSeenAt).getTime();
+  const inactiveAt = Number.isFinite(lastSeen)
+    ? new Date(lastSeen + (days * MS_PER_DAY)).toISOString()
+    : null;
+  const robloxLabel = record.robloxUsername
+    ? `${record.robloxUsername} (${record.robloxUserId})`
+    : record.robloxUserId;
+
+  return `${index + 1}. <@${record.discordId}> | ${robloxLabel} | inactive ${inactiveAt ? formatDiscordTimestamp(inactiveAt) : "unknown"}`;
+}
+
+function trimDiscordMessage(lines, limit = 1900) {
+  let output = "";
+  for (const line of lines) {
+    const next = output ? `${output}\n${line}` : line;
+    if (next.length > limit) {
+      return `${output}\n...`;
+    }
+    output = next;
+  }
+
+  return output;
+}
+
+async function queueInactiveWipe(interaction, record, days) {
+  const daysSince = getDaysSinceIso(record.lastGameSeenAt);
+  const reason = `Automatic inactivity unwave: no in-game activity for ${daysSince ?? days}+ days.`;
+  const actionData = {
+    actionType: "wipe",
+    targetUserId: record.robloxUserId,
+    reason,
+    requestedById: interaction.user.id,
+    requestedByTag: interaction.user.tag,
+    dedupeKey: `inactivity-wipe:${record.robloxUserId}`,
+  };
+  const queued = queueAdminAction(actionData);
+
+  try {
+    await logAdminActionRequest(actionData, queued.duplicate ? queued.record : null);
+  } catch (err) {
+    console.error("Failed posting inactivity wipe transcript:", err);
+  }
+
+  return queued;
+}
+
+async function handleInactiveCheckCommand(interaction, guild) {
+  const subcommand = interaction.options.getSubcommand();
+  const days = getSlashInteger(interaction, "days", INACTIVITY_DAYS, 1, 3650);
+  const limit = getSlashInteger(interaction, "limit", INACTIVITY_CONFIRM_LIMIT, 1, INACTIVITY_MAX_LIMIT);
+  const now = Date.now();
+  const inactiveCutoffIso = getInactiveCutoffIso(days, now);
+
+  if (subcommand === "preview") {
+    const records = await verificationDb.listInactiveCandidates(inactiveCutoffIso, limit);
+    if (records.length === 0) {
+      return sendInteractionResponse(interaction, `No verified users are past the ${days}-day inactivity cutoff.`);
+    }
+
+    const lines = [
+      "**Inactive Preview**",
+      `Cutoff: ${days}+ days without joining/leaving in-game.`,
+      `Showing ${records.length} user${records.length === 1 ? "" : "s"}. Use \`/inactive-check confirm\` to unwave this cutoff.`,
+      "",
+      ...records.map((record, index) => formatInactiveCandidate(record, index, now)),
+    ];
+    return sendInteractionResponse(interaction, trimDiscordMessage(lines));
+  }
+
+  if (subcommand === "near") {
+    const within = getSlashInteger(interaction, "within", INACTIVITY_NEAR_DAYS, 1, days);
+    const nearCutoffIso = getInactiveCutoffIso(Math.max(0, days - within), now);
+    const records = await verificationDb.listNearlyInactiveCandidates(nearCutoffIso, inactiveCutoffIso, limit);
+    if (records.length === 0) {
+      return sendInteractionResponse(interaction, `No verified users are within ${within} day${within === 1 ? "" : "s"} of the ${days}-day inactivity cutoff.`);
+    }
+
+    const lines = [
+      "**Nearly Inactive**",
+      `Cutoff: ${days} days. Window: next ${within} day${within === 1 ? "" : "s"}.`,
+      `Showing ${records.length} user${records.length === 1 ? "" : "s"}.`,
+      "",
+      ...records.map((record, index) => formatNearInactiveCandidate(record, index, days)),
+    ];
+    return sendInteractionResponse(interaction, trimDiscordMessage(lines));
+  }
+
+  if (subcommand !== "confirm") {
+    return sendInteractionResponse(interaction, "Unknown inactive-check action.");
+  }
+
+  const records = await verificationDb.listInactiveCandidates(inactiveCutoffIso, limit);
+  if (records.length === 0) {
+    return sendInteractionResponse(interaction, `No verified users are past the ${days}-day inactivity cutoff.`);
+  }
+
+  const processed = [];
+  const skipped = [];
+  const failed = [];
+
+  for (const record of records) {
+    const targetMember = await guild.members.fetch(record.discordId).catch(() => null);
+    if (targetMember && isMemberInactivityExempt(targetMember)) {
+      skipped.push(`<@${record.discordId}>`);
+      continue;
+    }
+
+    try {
+      const queued = await queueInactiveWipe(interaction, record, days);
+      if (targetMember) {
+        await applyInactiveDiscordRoles(targetMember);
+        await safeSendDm(
+          targetMember.user,
+          `You have been marked as Unwaved in Thornvale because no in-game activity was recorded for ${getDaysSinceIso(record.lastGameSeenAt) ?? days}+ days. Your verification was removed and your character data has been queued for wipe.`
+        );
+      }
+
+      unlinkedUsers.add(record.discordId);
+      await verificationDb.deleteVerificationByDiscordId(record.discordId);
+      processed.push(`${queued.duplicate ? "already queued" : "queued"} ${record.robloxUsername || record.robloxUserId} (<@${record.discordId}>)`);
+    } catch (err) {
+      console.error("Inactive confirm error:", record, err);
+      failed.push(`${record.robloxUsername || record.robloxUserId} (<@${record.discordId}>)`);
+    }
+  }
+
+  const lines = [
+    "**Inactive Confirm Complete**",
+    `Processed: ${processed.length}`,
+    `Skipped exempt: ${skipped.length}`,
+    `Failed: ${failed.length}`,
+  ];
+
+  if (processed.length > 0) {
+    lines.push("", "**Processed**", ...processed.slice(0, 20));
+  }
+  if (skipped.length > 0) {
+    lines.push("", "**Skipped**", ...skipped.slice(0, 10));
+  }
+  if (failed.length > 0) {
+    lines.push("", "**Failed**", ...failed.slice(0, 10));
+  }
+
+  return sendInteractionResponse(interaction, trimDiscordMessage(lines));
+}
+
 async function handleEventSummaryCommand(interaction, mode, member) {
   await ensureEphemeralDefer(interaction);
 
@@ -1755,6 +2014,17 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   // ===============================
+  // INACTIVE CHECK
+  // ===============================
+  if (interaction.commandName === "inactive-check") {
+    if (!await ensureAdminPermission(interaction, member, "inactivecheck")) {
+      return;
+    }
+
+    return handleInactiveCheckCommand(interaction, guild);
+  }
+
+  // ===============================
   // UNLINK
   // ===============================
   if (interaction.commandName === "unlink") {
@@ -1852,6 +2122,11 @@ client.on("interactionCreate", async (interaction) => {
         console.error("Group accept role update error:", roleError);
         return sendInteractionResponse(interaction, `User accepted, but Discord roles could not be updated for ${targetMember.user.tag}.`);
       }
+
+      await safeSendDm(
+        targetMember.user,
+        "You have been accepted into Thornvale. Your Discord roles have been updated."
+      );
 
       return sendInteractionResponse(interaction, `User accepted. Envisioned was applied and Wald was removed for ${targetMember.user.tag}.`);
 
@@ -2099,6 +2374,9 @@ app.get("/oauth/roblox/callback", async (req, res) => {
     if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
       await member.roles.add(VERIFIED_ROLE_ID);
     }
+    if (UNWAVED_ROLE_ID && member.roles.cache.has(UNWAVED_ROLE_ID)) {
+      await member.roles.remove(UNWAVED_ROLE_ID);
+    }
 
     return sendOAuthHtml(
       res,
@@ -2140,6 +2418,9 @@ app.post("/verify", async (req, res) => {
 
     if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
       await member.roles.add(VERIFIED_ROLE_ID);
+    }
+    if (UNWAVED_ROLE_ID && member.roles.cache.has(UNWAVED_ROLE_ID)) {
+      await member.roles.remove(UNWAVED_ROLE_ID);
     }
 
     if (robloxUserId) {
@@ -2184,7 +2465,13 @@ app.post("/checkUnlink", async (req, res) => {
     return res.json({ unlinked: true });
   }
 
-  res.json({ unlinked: false });
+  try {
+    const record = await verificationDb.getVerificationByDiscordId(discordId);
+    return res.json({ unlinked: !record });
+  } catch (err) {
+    console.error("Persistent unlink check error:", err);
+    return res.status(500).send("Unlink check failed");
+  }
 });
 
 app.post("/verification/lookup", async (req, res) => {
@@ -2219,6 +2506,57 @@ app.post("/verification/lookup", async (req, res) => {
   } catch (err) {
     console.error("Verification lookup error:", err);
     return res.status(500).send("Verification lookup failed");
+  }
+});
+
+app.post("/activity/game", async (req, res) => {
+  if (req.headers["x-api-key"] !== API_KEY) {
+    return res.status(403).send("Unauthorized");
+  }
+
+  const robloxUserId = req.body?.robloxUserId ? String(req.body.robloxUserId) : "";
+  if (!robloxUserId) {
+    return res.status(400).send("Missing robloxUserId");
+  }
+
+  const eventType = String(req.body?.eventType || req.body?.event || "seen").toLowerCase();
+  try {
+    const record = await verificationDb.recordGameActivity({
+      robloxUserId,
+      eventType,
+      robloxUsername: typeof req.body?.robloxUsername === "string" ? req.body.robloxUsername : "",
+      robloxDisplayName: typeof req.body?.robloxDisplayName === "string" ? req.body.robloxDisplayName : "",
+    });
+
+    if (!record) {
+      return res.json({ ok: true, verified: false });
+    }
+
+    if (eventType === "join" && client.isReady()) {
+      try {
+        const guild = await client.guilds.fetch(GUILD_ID);
+        const member = await guild.members.fetch(record.discordId);
+        if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
+          await member.roles.add(VERIFIED_ROLE_ID);
+        }
+        if (UNWAVED_ROLE_ID && member.roles.cache.has(UNWAVED_ROLE_ID)) {
+          await member.roles.remove(UNWAVED_ROLE_ID);
+        }
+      } catch (roleErr) {
+        console.error("Game activity role refresh error:", roleErr);
+      }
+    }
+
+    return res.json({
+      ok: true,
+      verified: true,
+      discordId: record.discordId,
+      robloxUserId: record.robloxUserId,
+      lastGameSeenAt: record.lastGameSeenAt,
+    });
+  } catch (err) {
+    console.error("Game activity update error:", err);
+    return res.status(500).send("Game activity update failed");
   }
 });
 
@@ -2538,7 +2876,7 @@ app.get("/privacy", (req, res) => {
   sendInfoPage(res, "Privacy Policy", [
     {
       heading: "Information We Collect",
-      body: "When you verify, we store your Discord user ID, Discord tag, Roblox user ID, Roblox username, Roblox display name, and verification timestamps.",
+      body: "When you verify, we store your Discord user ID, Discord tag, Roblox user ID, Roblox username, Roblox display name, verification timestamps, and last in-game activity timestamps.",
     },
     {
       heading: "How We Use Information",

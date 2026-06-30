@@ -29,6 +29,60 @@ function buildSlashCommands() {
       .setDescription("Restore your team roles from Roblox"),
 
     new SlashCommandBuilder()
+      .setName("inactive-check")
+      .setDescription("Preview or confirm in-game inactivity unwaves")
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("preview")
+          .setDescription("Preview verified users past the inactivity cutoff")
+          .addIntegerOption((option) =>
+            option.setName("days")
+              .setDescription("Inactive after this many days")
+              .setRequired(false)
+          )
+          .addIntegerOption((option) =>
+            option.setName("limit")
+              .setDescription("Maximum users to list")
+              .setRequired(false)
+          )
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("near")
+          .setDescription("List verified users close to the inactivity cutoff")
+          .addIntegerOption((option) =>
+            option.setName("days")
+              .setDescription("Inactive after this many days")
+              .setRequired(false)
+          )
+          .addIntegerOption((option) =>
+            option.setName("within")
+              .setDescription("Show users becoming inactive within this many days")
+              .setRequired(false)
+          )
+          .addIntegerOption((option) =>
+            option.setName("limit")
+              .setDescription("Maximum users to list")
+              .setRequired(false)
+          )
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("confirm")
+          .setDescription("Unwave inactive users, remove roles, unlink, and queue wipes")
+          .addIntegerOption((option) =>
+            option.setName("days")
+              .setDescription("Inactive after this many days")
+              .setRequired(false)
+          )
+          .addIntegerOption((option) =>
+            option.setName("limit")
+              .setDescription("Maximum users to process")
+              .setRequired(false)
+          )
+      ),
+
+    new SlashCommandBuilder()
       .setName("groupaccept")
       .setDescription("Accept a Roblox group join request")
       .addStringOption((option) =>
