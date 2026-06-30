@@ -4,7 +4,16 @@ function buildSlashCommands() {
   return [
     new SlashCommandBuilder()
       .setName("verify")
-      .setDescription("Get a verification code for Roblox"),
+      .setDescription("Verify your Discord account with Roblox OAuth"),
+
+    new SlashCommandBuilder()
+      .setName("verification-system")
+      .setDescription("Post the Roblox verification panel")
+      .addStringOption((option) =>
+        option.setName("channelid")
+          .setDescription("Optional channel ID or mention")
+          .setRequired(false)
+      ),
 
     new SlashCommandBuilder()
       .setName("unlink")

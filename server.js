@@ -1,9 +1,11 @@
 const express = require("express");
+const crypto = require("crypto");
 const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
   Client,
+  EmbedBuilder,
   GatewayIntentBits,
 } = require("discord.js");
 const { createSpreadsheetPermissionService } = require("./spreadsheetPermissions");
@@ -30,11 +32,17 @@ const {
   GUILD_ID,
   INTERACTION_FOLLOW_UP_WINDOW_MS,
   MOD_ROLE_ID,
+  PUBLIC_BASE_URL,
+  ROBLOX_OAUTH_CLIENT_ID,
+  ROBLOX_OAUTH_CLIENT_SECRET,
+  ROBLOX_OAUTH_REDIRECT_URI,
+  ROBLOX_OAUTH_SCOPES,
   TALENTS_CHANNEL_ID,
   TALENT_LOOKUP_CLAIM_TIMEOUT_MS,
   TALENT_LOOKUP_RETENTION_MS,
   TALENT_LOOKUP_WAIT_TIMEOUT_MS,
   VERIFIED_ROLE_ID,
+  VERIFICATION_CHANNEL_ID,
   WALD_ROLE_ID,
   WIPE_CHANNEL_ID,
   roleMap,
@@ -57,12 +65,17 @@ const { registerSlashCommands } = require("./src/registerSlashCommands");
 const {
   buildDiscordMessageUrl,
   formatOptionalString,
+  parseChannelIdInput,
   parsePositiveInteger,
   parseTimestamp,
 } = require("./src/utils");
+const { createVerificationDatabase } = require("./src/verificationDatabase");
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+
+const verificationDb = createVerificationDatabase();
 
 const client = new Client({
   intents: [
@@ -165,6 +178,211 @@ function createVerificationRequest(interaction) {
     interactionToken: interaction.token,
     createdAt: Date.now(),
   };
+}
+
+function base64Url(buffer) {
+  return Buffer.from(buffer)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function createRandomToken(byteLength = 32) {
+  return base64Url(crypto.randomBytes(byteLength));
+}
+
+function createCodeChallenge(codeVerifier) {
+  return base64Url(crypto.createHash("sha256").update(codeVerifier).digest());
+}
+
+function isRobloxOAuthConfigured() {
+  return ROBLOX_OAUTH_CLIENT_ID
+    && ROBLOX_OAUTH_CLIENT_SECRET
+    && ROBLOX_OAUTH_REDIRECT_URI;
+}
+
+function buildRobloxAuthorizeUrl(session) {
+  const params = new URLSearchParams({
+    client_id: ROBLOX_OAUTH_CLIENT_ID,
+    redirect_uri: ROBLOX_OAUTH_REDIRECT_URI,
+    scope: ROBLOX_OAUTH_SCOPES,
+    response_type: "code",
+    state: session.state,
+    nonce: session.nonce,
+    code_challenge: createCodeChallenge(session.codeVerifier),
+    code_challenge_method: "S256",
+  });
+
+  return `https://apis.roblox.com/oauth/v1/authorize?${params.toString()}`;
+}
+
+function buildVerificationPanelPayload() {
+  const embed = new EmbedBuilder()
+    .setTitle("Verification System")
+    .setDescription("Welcome to Verfall! Click the button below to verify your account and unlock all channels.")
+    .setColor(0x2fb8df)
+    .setFooter({ text: "Verification System" })
+    .setTimestamp(new Date());
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("verification|begin")
+      .setLabel("Get Verified Role")
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  return {
+    embeds: [embed],
+    components: [row],
+  };
+}
+
+function buildVerificationLinkPayload(authorizationUrl) {
+  return {
+    content: "Click the button below to verify through Roblox. This link is only for you and expires soon.",
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setLabel("Verify Here")
+          .setStyle(ButtonStyle.Link)
+          .setURL(authorizationUrl)
+      ),
+    ],
+    ephemeral: true,
+  };
+}
+
+async function createRobloxVerificationLink(interaction, member) {
+  if (!isRobloxOAuthConfigured()) {
+    return {
+      ok: false,
+      message: "Roblox OAuth is not configured yet. Set ROBLOX_OAUTH_CLIENT_ID, ROBLOX_OAUTH_CLIENT_SECRET, and ROBLOX_OAUTH_REDIRECT_URI.",
+    };
+  }
+
+  if (member.roles.cache.has(VERIFIED_ROLE_ID)) {
+    return {
+      ok: false,
+      alreadyVerified: true,
+      message: "You are already verified.",
+    };
+  }
+
+  const existing = await verificationDb.getVerificationByDiscordId(interaction.user.id);
+  if (existing) {
+    if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
+      await member.roles.add(VERIFIED_ROLE_ID);
+    }
+    return {
+      ok: false,
+      alreadyVerified: true,
+      message: "You are already verified.",
+    };
+  }
+
+  const session = {
+    state: createRandomToken(32),
+    nonce: createRandomToken(24),
+    codeVerifier: createRandomToken(64),
+    discordId: interaction.user.id,
+    discordTag: interaction.user.tag,
+  };
+  await verificationDb.createOAuthSession(session);
+
+  return {
+    ok: true,
+    authorizationUrl: buildRobloxAuthorizeUrl(session),
+  };
+}
+
+async function sendRobloxVerificationLink(interaction, member) {
+  const result = await createRobloxVerificationLink(interaction, member);
+  if (!result.ok) {
+    return interaction.reply({
+      content: result.message,
+      ephemeral: true,
+    });
+  }
+
+  return interaction.reply(buildVerificationLinkPayload(result.authorizationUrl));
+}
+
+async function exchangeRobloxOAuthCode(code, session) {
+  const response = await fetch("https://apis.roblox.com/oauth/v1/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      client_id: ROBLOX_OAUTH_CLIENT_ID,
+      client_secret: ROBLOX_OAUTH_CLIENT_SECRET,
+      redirect_uri: ROBLOX_OAUTH_REDIRECT_URI,
+      code_verifier: session.codeVerifier,
+    }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = payload.error_description || payload.error || "Roblox token exchange failed.";
+    throw new Error(message);
+  }
+
+  return payload;
+}
+
+async function fetchRobloxUserInfo(accessToken) {
+  const response = await fetch("https://apis.roblox.com/oauth/v1/userinfo", {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = payload.error_description || payload.error || "Roblox userinfo request failed.";
+    throw new Error(message);
+  }
+
+  return payload;
+}
+
+function getRobloxIdentity(userInfo) {
+  const robloxUserId = userInfo?.sub ? String(userInfo.sub) : "";
+  if (!robloxUserId) {
+    return null;
+  }
+
+  return {
+    robloxUserId,
+    robloxUsername: userInfo.preferred_username || userInfo.nickname || userInfo.name || "",
+    robloxDisplayName: userInfo.name || userInfo.nickname || userInfo.preferred_username || "",
+  };
+}
+
+function sendOAuthHtml(res, title, message, statusCode = 200) {
+  return res.status(statusCode).send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${title}</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #101216; color: #f5f5f5; font-family: Georgia, serif; }
+    main { width: min(560px, calc(100vw - 40px)); border-left: 2px solid #2fb8df; padding: 24px 28px; background: rgba(255,255,255,0.035); }
+    h1 { margin: 0 0 12px; font-size: 28px; font-weight: 500; }
+    p { margin: 0; line-height: 1.55; color: #cfd6e3; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>${title}</h1>
+    <p>${message}</p>
+  </main>
+</body>
+</html>`);
 }
 
 async function sendVerificationCompletionFollowUp(verificationRequest) {
@@ -1375,6 +1593,13 @@ client.once("clientReady", async () => {
   await registerSlashCommands(guild);
 
   try {
+    await verificationDb.init();
+    console.log(`Verification database ready (${verificationDb.type}).`);
+  } catch (err) {
+    console.error("Verification database failed to initialize:", err);
+  }
+
+  try {
     await spreadsheetPermissionService.refreshNow();
     const permissionSheetError = spreadsheetPermissionService.getLastError?.();
     if (permissionSheetError) {
@@ -1413,6 +1638,13 @@ client.on("interactionCreate", async (interaction) => {
     });
     if (handled) {
       return;
+    }
+  }
+
+  if (interaction.isButton()) {
+    if (interaction.customId === "verification|begin") {
+      const { member } = await getInteractionMember(interaction);
+      return sendRobloxVerificationLink(interaction, member);
     }
   }
 
@@ -1458,6 +1690,36 @@ client.on("interactionCreate", async (interaction) => {
   // VERIFY
   // ===============================
   if (interaction.commandName === "verify") {
+    return sendRobloxVerificationLink(interaction, member);
+  }
+
+  if (interaction.commandName === "verification-system") {
+    if (!await ensureAdminPermission(interaction, member, "verification-system")) {
+      return;
+    }
+
+    const channelInput = interaction.options.getString("channelid");
+    const channelId = parseChannelIdInput(channelInput) || VERIFICATION_CHANNEL_ID || interaction.channelId;
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel || typeof channel.send !== "function") {
+      return interaction.reply({
+        content: "Could not find a channel I can post the verification panel in.",
+        ephemeral: true,
+      });
+    }
+
+    const message = await channel.send(buildVerificationPanelPayload());
+    const messageUrl = buildDiscordMessageUrl(message.channelId, message.id);
+    return interaction.reply({
+      content: messageUrl ? `Verification panel posted: ${messageUrl}` : "Verification panel posted.",
+      ephemeral: true,
+    });
+  }
+
+  // ===============================
+  // GET ROLES
+  // ===============================
+  if (interaction.commandName === "verify") {
 
     if (member.roles.cache.has(VERIFIED_ROLE_ID)) {
       return interaction.reply({
@@ -1500,6 +1762,13 @@ client.on("interactionCreate", async (interaction) => {
     if (!await ensureAdminPermission(interaction, member, "unlink", "❌ You do not have permission to use this command.")) {
       return;
     }
+  }
+
+  if (interaction.commandName === "unlink") {
+
+    if (!await ensureAdminPermission(interaction, member, "unlink", "❌ You do not have permission to use this command.")) {
+      return;
+    }
 
     const targetUser = interaction.options.getUser("user");
     const targetMember = await guild.members.fetch(targetUser.id);
@@ -1518,6 +1787,7 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       unlinkedUsers.add(targetUser.id);
+      await verificationDb.deleteVerificationByDiscordId(targetUser.id);
 
       return sendInteractionResponse(interaction, `✅ Successfully unlinked ${targetUser.tag}`);
 
@@ -1777,13 +2047,82 @@ client.on("interactionCreate", async (interaction) => {
 // ===============================
 // VERIFY ENDPOINT
 // ===============================
+app.get("/oauth/roblox/callback", async (req, res) => {
+  const { code, state, error, error_description: errorDescription } = req.query || {};
+  if (error) {
+    return sendOAuthHtml(
+      res,
+      "Verification Cancelled",
+      String(errorDescription || error || "Roblox authorization was cancelled."),
+      400
+    );
+  }
+
+  if (typeof code !== "string" || typeof state !== "string") {
+    return sendOAuthHtml(res, "Verification Failed", "Missing Roblox OAuth callback data.", 400);
+  }
+
+  const session = await verificationDb.consumeOAuthSession(state);
+  if (!session) {
+    return sendOAuthHtml(res, "Verification Expired", "That verification link expired. Please return to Discord and click Get Verified Role again.", 400);
+  }
+
+  try {
+    const tokenPayload = await exchangeRobloxOAuthCode(code, session);
+    const userInfo = await fetchRobloxUserInfo(tokenPayload.access_token);
+    const identity = getRobloxIdentity(userInfo);
+    if (!identity) {
+      return sendOAuthHtml(res, "Verification Failed", "Roblox did not return a usable user id.", 400);
+    }
+
+    const existingRobloxLink = await verificationDb.getVerificationByRobloxUserId(identity.robloxUserId);
+    if (existingRobloxLink && existingRobloxLink.discordId !== session.discordId) {
+      return sendOAuthHtml(
+        res,
+        "Already Linked",
+        "That Roblox account is already verified to another Discord account. Ask a moderator to unlink it first.",
+        409
+      );
+    }
+
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const member = await guild.members.fetch(session.discordId);
+
+    await verificationDb.upsertVerification({
+      discordId: session.discordId,
+      robloxUserId: identity.robloxUserId,
+      robloxUsername: identity.robloxUsername,
+      robloxDisplayName: identity.robloxDisplayName,
+    });
+    unlinkedUsers.delete(session.discordId);
+
+    if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
+      await member.roles.add(VERIFIED_ROLE_ID);
+    }
+
+    return sendOAuthHtml(
+      res,
+      "Verification Complete",
+      "Your Roblox account is now linked and your Discord verified role has been applied. You can return to Discord."
+    );
+  } catch (err) {
+    console.error("Roblox OAuth verification error:", err);
+    return sendOAuthHtml(res, "Verification Failed", "Something went wrong while verifying your Roblox account. Please try again.", 500);
+  }
+});
+
 app.post("/verify", async (req, res) => {
 
   if (req.headers["x-api-key"] !== API_KEY) {
     return res.status(403).send("Unauthorized");
   }
 
-  const { code } = req.body;
+  const {
+    code,
+    robloxUserId,
+    robloxUsername,
+    robloxDisplayName,
+  } = req.body;
   const verificationRequest = verificationCodes.get(code);
   const discordId = typeof verificationRequest === "string"
     ? verificationRequest
@@ -1803,6 +2142,16 @@ app.post("/verify", async (req, res) => {
       await member.roles.add(VERIFIED_ROLE_ID);
     }
 
+    if (robloxUserId) {
+      await verificationDb.upsertVerification({
+        discordId,
+        robloxUserId: String(robloxUserId),
+        robloxUsername: typeof robloxUsername === "string" ? robloxUsername : "",
+        robloxDisplayName: typeof robloxDisplayName === "string" ? robloxDisplayName : "",
+      });
+      unlinkedUsers.delete(discordId);
+    }
+
     try {
       const followUpSent = await sendVerificationCompletionFollowUp(verificationRequest);
       if (!followUpSent) {
@@ -1816,7 +2165,7 @@ app.post("/verify", async (req, res) => {
     console.error("Verification error:", err);
   }
 
-  res.json({ discordId });
+  res.json({ discordId, robloxUserId: robloxUserId ? String(robloxUserId) : null });
 });
 
 app.post("/checkUnlink", async (req, res) => {
@@ -1838,15 +2187,56 @@ app.post("/checkUnlink", async (req, res) => {
   res.json({ unlinked: false });
 });
 
+app.post("/verification/lookup", async (req, res) => {
+  if (req.headers["x-api-key"] !== API_KEY) {
+    return res.status(403).send("Unauthorized");
+  }
+
+  const discordId = req.body?.discordId ? String(req.body.discordId) : "";
+  const robloxUserId = req.body?.robloxUserId ? String(req.body.robloxUserId) : "";
+  if (!discordId && !robloxUserId) {
+    return res.status(400).send("Missing discordId or robloxUserId");
+  }
+
+  try {
+    const record = discordId
+      ? await verificationDb.getVerificationByDiscordId(discordId)
+      : await verificationDb.getVerificationByRobloxUserId(robloxUserId);
+
+    if (!record) {
+      return res.json({ verified: false });
+    }
+
+    return res.json({
+      verified: true,
+      discordId: record.discordId,
+      robloxUserId: record.robloxUserId,
+      robloxUsername: record.robloxUsername,
+      robloxDisplayName: record.robloxDisplayName,
+      verifiedAt: record.verifiedAt,
+      updatedAt: record.updatedAt,
+    });
+  } catch (err) {
+    console.error("Verification lookup error:", err);
+    return res.status(500).send("Verification lookup failed");
+  }
+});
+
 app.post("/updateRole", async (req, res) => {
 
   if (req.headers["x-api-key"] !== API_KEY) {
     return res.status(403).send("Unauthorized");
   }
 
-  const { discordId, team } = req.body;
+  let { discordId, team } = req.body;
+  const robloxUserId = req.body?.robloxUserId ? String(req.body.robloxUserId) : "";
+  if (!discordId && robloxUserId) {
+    const verification = await verificationDb.getVerificationByRobloxUserId(robloxUserId);
+    discordId = verification?.discordId;
+  }
+
   if (!discordId || !team) {
-    return res.status(400).send("Missing data");
+    return res.status(400).send("Missing discordId/robloxUserId or team");
   }
 
   try {

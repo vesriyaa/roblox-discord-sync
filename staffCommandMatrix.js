@@ -8,6 +8,7 @@ const STAFF_ROLE_PRIORITIES = {
 const STAFF_COMMANDS_BY_ROLE = {
   Mod: [
     "unlink",
+    "verificationsystem",
     "requestban",
   ],
   LoreTeam: [
