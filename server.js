@@ -2465,8 +2465,119 @@ app.post("/talentLookups/report", async (req, res) => {
 // ===============================
 client.login(BOT_TOKEN);
 
+function sendInfoPage(res, title, bodySections) {
+  const sections = bodySections
+    .map((section) => `
+      <section>
+        <h2>${section.heading}</h2>
+        <p>${section.body}</p>
+      </section>`)
+    .join("");
+
+  res.type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${title}</title>
+  <style>
+    body {
+      margin: 0;
+      background: #111;
+      color: #f4f4f4;
+      font-family: Georgia, "Times New Roman", serif;
+      line-height: 1.6;
+    }
+    main {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 56px 24px;
+    }
+    h1 {
+      font-size: 36px;
+      font-weight: 400;
+      margin: 0 0 24px;
+    }
+    h2 {
+      font-size: 20px;
+      font-weight: 400;
+      margin: 28px 0 8px;
+    }
+    p {
+      color: #d8d8d8;
+      margin: 0;
+    }
+    a {
+      color: #fce8a4;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>${title}</h1>
+    ${sections}
+  </main>
+</body>
+</html>`);
+}
+
 app.get("/", (req, res) => {
-  res.send("Bot running");
+  sendInfoPage(res, "Thornvale Verification", [
+    {
+      heading: "Account Linking",
+      body: "This service connects a Roblox account to a Discord account so Thornvale can apply verification, staff tools, and role sync features.",
+    },
+    {
+      heading: "Start",
+      body: "Use the verification button in the Thornvale Discord server to begin Roblox OAuth verification.",
+    },
+  ]);
+});
+
+app.get("/privacy", (req, res) => {
+  sendInfoPage(res, "Privacy Policy", [
+    {
+      heading: "Information We Collect",
+      body: "When you verify, we store your Discord user ID, Discord tag, Roblox user ID, Roblox username, Roblox display name, and verification timestamps.",
+    },
+    {
+      heading: "How We Use Information",
+      body: "This information is used only to connect Roblox and Discord accounts, apply verified roles, support role sync, and help Thornvale staff manage account verification.",
+    },
+    {
+      heading: "Data Sharing",
+      body: "We do not sell verification data. Data is used by Thornvale systems and staff for moderation, account linking, and game integration.",
+    },
+    {
+      heading: "Removal",
+      body: "You may ask Thornvale staff to unlink your account. Unlinking removes the stored Roblox and Discord verification link from the active verification database.",
+    },
+    {
+      heading: "Contact",
+      body: "For privacy questions or unlink requests, contact staff in the Thornvale Discord server.",
+    },
+  ]);
+});
+
+app.get("/terms", (req, res) => {
+  sendInfoPage(res, "Terms of Service", [
+    {
+      heading: "Use of Service",
+      body: "Thornvale Verification is provided to link Roblox and Discord accounts for access, verification, role sync, and related game systems.",
+    },
+    {
+      heading: "User Responsibilities",
+      body: "You agree not to abuse, bypass, impersonate, or interfere with the verification process. Staff may unlink or revoke access when needed for moderation or security.",
+    },
+    {
+      heading: "Availability",
+      body: "The service is provided as-is and may be changed, paused, or removed as Thornvale systems evolve.",
+    },
+    {
+      heading: "Contact",
+      body: "For questions about these terms, contact staff in the Thornvale Discord server.",
+    },
+  ]);
 });
 
 const PORT = process.env.PORT || 3000;
