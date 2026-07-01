@@ -60,6 +60,8 @@ const {
   adminActions,
   eventSessionOrder,
   eventSessions,
+  revaluationSessionOrder,
+  revaluationSessions,
   talentLookupOrder,
   talentLookupRequests,
   talentLookupWaiters,
@@ -903,6 +905,206 @@ async function refreshEventSummary(session) {
     return message;
   } catch {
     return postEventSummary(session);
+  }
+}
+
+const REVALUATION_SESSION_RETENTION_LIMIT = 250;
+
+function normalizeRevaluationParticipant(participant) {
+  const userId = parsePositiveInteger(participant?.userId ?? participant?.robloxUserId);
+  if (!userId) {
+    return null;
+  }
+
+  const results = typeof participant?.results === "object" && participant.results !== null
+    ? participant.results
+    : {};
+
+  return {
+    userId,
+    playerName: formatOptionalString(participant?.playerName, String(userId)),
+    displayName: formatOptionalString(participant?.displayName, participant?.playerName || String(userId)),
+    status: formatOptionalString(participant?.status, "Pending"),
+    stage: formatOptionalString(participant?.stage, ""),
+    updatedAt: parseTimestamp(participant?.updatedAt) ?? Date.now(),
+    results: {
+      trainerPassed: results.trainerPassed === true,
+      speedCompleted: results.speedCompleted === true,
+      speedTime: Number.isFinite(Number(results.speedTime)) ? Number(results.speedTime) : null,
+      speedReached: Number.parseInt(String(results.speedReached ?? 0), 10) || 0,
+      titanDummyNapes: Number.parseInt(String(results.titanDummyNapes ?? 0), 10) || 0,
+      titanDummyElapsedTime: Number.isFinite(Number(results.titanDummyElapsedTime)) ? Number(results.titanDummyElapsedTime) : null,
+      titanKills: Number.parseInt(String(results.titanKills ?? 0), 10) || 0,
+      titanTotal: Number.parseInt(String(results.titanTotal ?? 0), 10) || 0,
+      titanCleared: results.titanCleared === true,
+      titanElapsedTime: Number.isFinite(Number(results.titanElapsedTime)) ? Number(results.titanElapsedTime) : null,
+    },
+  };
+}
+
+function normalizeRevaluationParticipants(participants) {
+  return (Array.isArray(participants) ? participants : [])
+    .map(normalizeRevaluationParticipant)
+    .filter(Boolean)
+    .sort((left, right) => left.playerName.localeCompare(right.playerName));
+}
+
+function mergeRevaluationParticipants(incomingParticipants, existingParticipants = []) {
+  const participantMap = new Map();
+
+  for (const participant of existingParticipants) {
+    participantMap.set(participant.userId, participant);
+  }
+
+  for (const participant of incomingParticipants) {
+    const existingParticipant = participantMap.get(participant.userId);
+    if (!existingParticipant || participant.updatedAt >= existingParticipant.updatedAt) {
+      participantMap.set(participant.userId, participant);
+    }
+  }
+
+  return Array.from(participantMap.values())
+    .sort((left, right) => left.playerName.localeCompare(right.playerName));
+}
+
+function trackRevaluationSessionOrder(sessionId) {
+  const existingIndex = revaluationSessionOrder.indexOf(sessionId);
+  if (existingIndex >= 0) {
+    revaluationSessionOrder.splice(existingIndex, 1);
+  }
+
+  revaluationSessionOrder.push(sessionId);
+  while (revaluationSessionOrder.length > REVALUATION_SESSION_RETENTION_LIMIT) {
+    const oldestSessionId = revaluationSessionOrder.shift();
+    if (oldestSessionId) {
+      revaluationSessions.delete(oldestSessionId);
+    }
+  }
+}
+
+function upsertRevaluationSession(payload) {
+  const sessionId = formatOptionalString(payload?.sessionId ?? payload?.id);
+  if (!sessionId) {
+    return null;
+  }
+
+  const existingSession = revaluationSessions.get(sessionId);
+  const incomingUpdatedAt = parseTimestamp(payload?.updatedAt);
+  if (
+    existingSession
+    && incomingUpdatedAt
+    && existingSession.sourceUpdatedAt
+    && incomingUpdatedAt < existingSession.sourceUpdatedAt
+  ) {
+    return existingSession;
+  }
+
+  const hasActiveFlag = typeof payload?.active === "boolean";
+  const active = hasActiveFlag ? payload.active === true : existingSession?.active ?? true;
+  const sourceUpdatedAt = incomingUpdatedAt ?? existingSession?.sourceUpdatedAt ?? Date.now();
+  const explicitEndedAt = parseTimestamp(payload?.endedAt);
+
+  const session = {
+    sessionId,
+    name: formatOptionalString(payload?.name ?? payload?.sessionName, existingSession?.name || sessionId),
+    active,
+    startedAt: parseTimestamp(payload?.startedAt) ?? existingSession?.startedAt ?? Date.now(),
+    endedAt: active
+      ? null
+      : explicitEndedAt ?? existingSession?.endedAt ?? (hasActiveFlag ? Date.now() : null),
+    sourceUpdatedAt,
+    updatedAt: sourceUpdatedAt,
+    participants: mergeRevaluationParticipants(
+      normalizeRevaluationParticipants(payload?.participants ?? payload?.entries),
+      existingSession?.participants
+    ),
+    statusMessage: existingSession?.statusMessage || null,
+  };
+
+  revaluationSessions.set(sessionId, session);
+  trackRevaluationSessionOrder(sessionId);
+  return session;
+}
+
+function formatRevaluationResult(participant) {
+  const results = participant.results || {};
+  const trainer = results.trainerPassed ? "Trainer Pass" : "Trainer Fail";
+  const speed = results.speedCompleted
+    ? (typeof results.speedTime === "number" ? `Speed ${results.speedTime.toFixed(2)}s` : "Speed Done")
+    : `Speed ${results.speedReached || 0}/4`;
+  const dummies = `Dummies ${results.titanDummyNapes || 0}`;
+  const titans = `Titans ${results.titanKills || 0}/${results.titanTotal || 0}`;
+  return `${trainer} | ${speed} | ${dummies} | ${titans}`;
+}
+
+function buildRevaluationStatusMessage(session) {
+  const lines = [
+    `**${session.name}**`,
+    `Session ID: \`${session.sessionId}\``,
+    `Status: **${session.active ? "Active" : "Ended"}**`,
+    `Started: ${formatDiscordTimestamp(session.startedAt)}`,
+    `Ended: ${session.active ? "Pending" : formatDiscordTimestamp(session.endedAt)}`,
+    "",
+    "**Scores**",
+  ];
+
+  if (session.participants.length === 0) {
+    lines.push("*No participants sent yet.*");
+  } else {
+    for (const participant of session.participants.slice(0, 35)) {
+      const stage = participant.stage || participant.status || "Pending";
+      lines.push(`- **${participant.playerName}**: ${stage} - ${formatRevaluationResult(participant)}`);
+    }
+
+    if (session.participants.length > 35) {
+      lines.push(`*And ${session.participants.length - 35} more participant(s).*`);
+    }
+  }
+
+  lines.push("", `Last Update: ${formatDiscordTimestamp(session.updatedAt)}`);
+  return lines.join("\n").slice(0, 1900);
+}
+
+async function postRevaluationStatus(session) {
+  const channel = await client.channels.fetch(EXAM_SERVICE_CHANNEL_ID);
+  if (!channel || typeof channel.send !== "function") {
+    throw new Error("Exam service channel unavailable");
+  }
+
+  const message = await channel.send({
+    content: buildRevaluationStatusMessage(session),
+  });
+
+  session.statusMessage = {
+    channelId: channel.id,
+    messageId: message.id,
+    updatedAt: Date.now(),
+  };
+
+  return message;
+}
+
+async function syncRevaluationStatus(session) {
+  const currentMessage = session.statusMessage;
+  if (!currentMessage?.channelId || !currentMessage?.messageId) {
+    return postRevaluationStatus(session);
+  }
+
+  const channel = await client.channels.fetch(currentMessage.channelId);
+  if (!channel?.messages?.fetch) {
+    return postRevaluationStatus(session);
+  }
+
+  try {
+    const message = await channel.messages.fetch(currentMessage.messageId);
+    await message.edit({
+      content: buildRevaluationStatusMessage(session),
+    });
+
+    session.statusMessage.updatedAt = Date.now();
+    return message;
+  } catch {
+    return postRevaluationStatus(session);
   }
 }
 
@@ -2667,6 +2869,33 @@ app.post("/eventSessions/sync", async (req, res) => {
   res.json({
     ok: true,
     eventId: session.eventId,
+    active: session.active,
+    participants: session.participants.length,
+  });
+});
+
+app.post("/revaluationSessions/sync", async (req, res) => {
+
+  if (req.headers["x-api-key"] !== API_KEY) {
+    return res.status(403).send("Unauthorized");
+  }
+
+  const session = upsertRevaluationSession(req.body || {});
+  if (!session) {
+    return res.status(400).send("Missing revaluation session payload");
+  }
+
+  if (client.isReady()) {
+    try {
+      await syncRevaluationStatus(session);
+    } catch (err) {
+      console.error("Revaluation status sync error:", err);
+    }
+  }
+
+  res.json({
+    ok: true,
+    sessionId: session.sessionId,
     active: session.active,
     participants: session.participants.length,
   });

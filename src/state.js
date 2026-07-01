@@ -9,6 +9,8 @@ const talentLookupOrder = [];
 const talentLookupWaiters = new Map();
 const eventSessions = new Map();
 const eventSessionOrder = [];
+const revaluationSessions = new Map();
+const revaluationSessionOrder = [];
 
 module.exports = {
   adminActionDedupe,
@@ -17,6 +19,8 @@ module.exports = {
   adminActions,
   eventSessionOrder,
   eventSessions,
+  revaluationSessionOrder,
+  revaluationSessions,
   talentLookupOrder,
   talentLookupRequests,
   talentLookupWaiters,
