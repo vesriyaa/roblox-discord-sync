@@ -802,13 +802,17 @@ function buildEventSummaryMessage(session) {
   ].join("\n");
 }
 
-function formatDiscordTimestamp(timestamp) {
+function formatUnixDiscordTimestamp(timestamp, style = "F") {
   const parsedTimestamp = parseTimestamp(timestamp);
   if (!parsedTimestamp) {
     return "Unknown";
   }
 
-  return `<t:${parsedTimestamp}:F>`;
+  const discordTimestamp = parsedTimestamp > 10000000000
+    ? Math.floor(parsedTimestamp / 1000)
+    : parsedTimestamp;
+
+  return `<t:${discordTimestamp}:${style}>`;
 }
 
 function buildEventStatusMessage(session) {
@@ -817,9 +821,9 @@ function buildEventStatusMessage(session) {
     `Event ID: \`${session.eventId}\``,
     `Map: **${session.mapName}**`,
     `Status: **${session.active ? "Active" : "Ended"}**`,
-    `Started: ${formatDiscordTimestamp(session.startedAt)}`,
-    `Ended: ${session.active ? "Pending" : formatDiscordTimestamp(session.endedAt)}`,
-    `Last Update: ${formatDiscordTimestamp(session.updatedAt)}`,
+    `Started: ${formatUnixDiscordTimestamp(session.startedAt)}`,
+    `Ended: ${session.active ? "Pending" : formatUnixDiscordTimestamp(session.endedAt)}`,
+    `Last Update: ${formatUnixDiscordTimestamp(session.updatedAt)}`,
     `Summary Command: \`/postevent eventid:${session.eventId}\``,
   ].join("\n");
 }
@@ -924,6 +928,7 @@ function normalizeRevaluationParticipant(participant) {
     userId,
     playerName: formatOptionalString(participant?.playerName, String(userId)),
     displayName: formatOptionalString(participant?.displayName, participant?.playerName || String(userId)),
+    loreName: formatOptionalString(participant?.loreName ?? participant?.characterName, ""),
     status: formatOptionalString(participant?.status, "Pending"),
     stage: formatOptionalString(participant?.stage, ""),
     updatedAt: parseTimestamp(participant?.updatedAt) ?? Date.now(),
@@ -1042,8 +1047,8 @@ function buildRevaluationStatusMessage(session) {
     `**${session.name}**`,
     `Session ID: \`${session.sessionId}\``,
     `Status: **${session.active ? "Active" : "Ended"}**`,
-    `Started: ${formatDiscordTimestamp(session.startedAt)}`,
-    `Ended: ${session.active ? "Pending" : formatDiscordTimestamp(session.endedAt)}`,
+    `Started: ${formatUnixDiscordTimestamp(session.startedAt)}`,
+    `Ended: ${session.active ? "Pending" : formatUnixDiscordTimestamp(session.endedAt)}`,
     "",
     "**Scores**",
   ];
@@ -1053,7 +1058,8 @@ function buildRevaluationStatusMessage(session) {
   } else {
     for (const participant of session.participants.slice(0, 35)) {
       const stage = participant.stage || participant.status || "Pending";
-      lines.push(`- **${participant.playerName}**: ${stage} - ${formatRevaluationResult(participant)}`);
+      const loreName = participant.loreName ? ` / *${participant.loreName}*` : "";
+      lines.push(`- **${participant.playerName}**${loreName}: ${stage} - ${formatRevaluationResult(participant)}`);
     }
 
     if (session.participants.length > 35) {
@@ -1061,7 +1067,7 @@ function buildRevaluationStatusMessage(session) {
     }
   }
 
-  lines.push("", `Last Update: ${formatDiscordTimestamp(session.updatedAt)}`);
+  lines.push("", `Last Update: ${formatUnixDiscordTimestamp(session.updatedAt)}`);
   return lines.join("\n").slice(0, 1900);
 }
 
