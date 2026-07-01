@@ -179,6 +179,15 @@ function buildSlashCommands() {
       ),
 
     new SlashCommandBuilder()
+      .setName("shutdown")
+      .setDescription("Shut down all active Thornvale places")
+      .addStringOption((option) =>
+        option.setName("reason")
+          .setDescription("Optional shutdown reason")
+          .setRequired(false)
+      ),
+
+    new SlashCommandBuilder()
       .setName("grouprank")
       .setDescription("Change a Roblox member's group rank")
       .addStringOption((option) =>

@@ -114,6 +114,7 @@ const EAGER_DEFERRED_COMMANDS = new Set([
   "talents",
   "postevent",
   "refreshevent",
+  "shutdown",
   "grouprank",
 ]);
 const MEMBER_COMMAND_ROLE_ID = process.env.MEMBER_COMMAND_ROLE_ID || "1415902349192331383";
@@ -1274,6 +1275,7 @@ function getActionLabel(actionType) {
     wipe: "wipe",
     unwipe: "unwipe",
     restore: "restore",
+    shutdown: "shutdown",
   };
 
   return labels[actionType] || actionType;
@@ -1472,6 +1474,10 @@ function getAdminActionDescription(action) {
 
   if (action.actionType === "wipe") {
     return `wipe for Roblox user ${action.targetUserId}`;
+  }
+
+  if (action.actionType === "shutdown") {
+    return "shutdown for all active Thornvale places";
   }
 
   return `admin action for Roblox user ${action.targetUserId}`;
@@ -1689,8 +1695,11 @@ async function postAdminActionResult(record) {
   }
 
   const outcome = record.resultSuccess ? "completed" : "failed";
+  const targetText = record.actionType === "shutdown"
+    ? "all active Thornvale places"
+    : `Roblox user ${record.targetUserId}`;
   await channel.send({
-    content: `${record.requestedByTag} ${outcome} ${getActionLabel(record.actionType)} for Roblox user ${record.targetUserId}: ${record.resultMessage}`,
+    content: `${record.requestedByTag} ${outcome} ${getActionLabel(record.actionType)} for ${targetText}: ${record.resultMessage}`,
   });
 }
 
@@ -2464,6 +2473,26 @@ client.on("interactionCreate", async (interaction) => {
   // ===============================
   if (interaction.commandName === "refreshevent") {
     return handleEventSummaryCommand(interaction, "refresh", member);
+  }
+
+  // ===============================
+  // SHUTDOWN
+  // ===============================
+  if (interaction.commandName === "shutdown") {
+    if (!await ensureAdminPermission(interaction, member, "shutdown")) {
+      return;
+    }
+
+    const reason = interaction.options.getString("reason") || "";
+
+    return handleQueuedAdminAction(interaction, {
+      actionType: "shutdown",
+      targetUserId: "all",
+      reason,
+      requestedById: interaction.user.id,
+      requestedByTag: interaction.user.tag,
+      dedupeKey: "shutdown:all-active-places",
+    });
   }
 
   // ===============================
