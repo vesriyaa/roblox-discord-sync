@@ -929,6 +929,7 @@ function normalizeRevaluationParticipant(participant) {
     playerName: formatOptionalString(participant?.playerName, String(userId)),
     displayName: formatOptionalString(participant?.displayName, participant?.playerName || String(userId)),
     loreName: formatOptionalString(participant?.loreName ?? participant?.characterName, ""),
+    evaluation: formatOptionalString(participant?.evaluation, ""),
     status: formatOptionalString(participant?.status, "Pending"),
     stage: formatOptionalString(participant?.stage, ""),
     updatedAt: parseTimestamp(participant?.updatedAt) ?? Date.now(),
@@ -1059,7 +1060,8 @@ function buildRevaluationStatusMessage(session) {
     for (const participant of session.participants.slice(0, 35)) {
       const stage = participant.stage || participant.status || "Pending";
       const loreName = participant.loreName ? ` / *${participant.loreName}*` : "";
-      lines.push(`- **${participant.playerName}**${loreName}: ${stage} - ${formatRevaluationResult(participant)}`);
+      const evaluation = participant.evaluation ? ` | Eval **${participant.evaluation}**` : "";
+      lines.push(`- **${participant.playerName}**${loreName}${evaluation}: ${stage} - ${formatRevaluationResult(participant)}`);
     }
 
     if (session.participants.length > 35) {
