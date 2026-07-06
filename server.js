@@ -3096,14 +3096,49 @@ app.post("/talentLookups/report", async (req, res) => {
 // ===============================
 client.login(BOT_TOKEN);
 
-function sendInfoPage(res, title, bodySections) {
-  const sections = bodySections
-    .map((section) => `
-      <section>
-        <h2>${section.heading}</h2>
-        <p>${section.body}</p>
-      </section>`)
+const LEGAL_EFFECTIVE_DATE = "July 6, 2026";
+
+function renderDustMotes() {
+  const motes = [
+    [5, 56, 2, 34, 0, 18],
+    [8, 82, 1, 42, 3, -12],
+    [12, 44, 3, 48, 6, 24],
+    [16, 74, 2, 38, 2, -20],
+    [19, 20, 1, 46, 7, 16],
+    [23, 64, 2, 41, 1, -16],
+    [27, 36, 1, 50, 8, 22],
+    [31, 87, 2, 45, 4, -18],
+    [34, 15, 1, 37, 5, 14],
+    [38, 58, 3, 44, 9, -26],
+    [42, 29, 2, 52, 2, 20],
+    [46, 78, 1, 39, 6, -14],
+    [51, 48, 2, 47, 3, 18],
+    [55, 19, 1, 43, 8, -22],
+    [59, 68, 3, 49, 0, 24],
+    [63, 33, 1, 40, 4, -18],
+    [67, 91, 2, 54, 7, 16],
+    [71, 52, 1, 36, 1, -12],
+    [75, 24, 3, 46, 5, 26],
+    [79, 72, 2, 51, 9, -20],
+    [83, 39, 1, 42, 2, 14],
+    [87, 84, 2, 48, 6, -24],
+    [91, 57, 1, 44, 3, 22],
+    [95, 31, 2, 53, 8, -16],
+    [14, 93, 1, 57, 10, 18],
+    [49, 94, 2, 60, 11, -18],
+    [72, 8, 1, 55, 12, 12],
+    [97, 70, 3, 58, 13, -22],
+  ];
+
+  return motes
+    .map(([x, y, size, duration, delay, drift]) => (
+      `<span class="dust" style="--x:${x};--y:${y};--size:${size}px;--duration:${duration}s;--delay:${delay}s;--drift:${drift}px"></span>`
+    ))
     .join("");
+}
+
+function renderBasePage(res, title, body, options = {}) {
+  const scripts = options.scripts || "";
 
   res.type("html").send(`<!doctype html>
 <html lang="en">
@@ -3112,86 +3147,683 @@ function sendInfoPage(res, title, bodySections) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${title}</title>
   <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      min-height: 100%;
+      background: #050403;
+    }
+
     body {
+      min-height: 100vh;
       margin: 0;
-      background: #111;
-      color: #f4f4f4;
+      background:
+        radial-gradient(circle at 50% 60%, rgba(120, 72, 28, 0.2), rgba(5, 4, 3, 0) 32rem),
+        radial-gradient(circle at 20% 18%, rgba(43, 48, 91, 0.18), rgba(5, 4, 3, 0) 22rem),
+        linear-gradient(180deg, #050403 0%, #0b0805 50%, #030302 100%);
+      color: #eee6d8;
       font-family: Georgia, "Times New Roman", serif;
       line-height: 1.6;
+      letter-spacing: 0;
+      overflow-x: hidden;
     }
-    main {
-      max-width: 760px;
-      margin: 0 auto;
-      padding: 56px 24px;
+
+    body::before {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      content: "";
+      background:
+        linear-gradient(90deg, rgba(184, 137, 35, 0.04), rgba(184, 137, 35, 0) 18%, rgba(184, 137, 35, 0) 82%, rgba(184, 137, 35, 0.04)),
+        radial-gradient(circle at center, rgba(255, 229, 154, 0.04), rgba(255, 229, 154, 0) 38rem);
     }
-    h1 {
-      font-size: 36px;
-      font-weight: 400;
-      margin: 0 0 24px;
-    }
-    h2 {
-      font-size: 20px;
-      font-weight: 400;
-      margin: 28px 0 8px;
-    }
-    p {
-      color: #d8d8d8;
-      margin: 0;
-    }
+
     a {
-      color: #fce8a4;
+      color: #d6a824;
+      text-decoration-color: rgba(214, 168, 36, 0.45);
+      text-underline-offset: 4px;
     }
-    .button {
-      display: inline-block;
-      margin-top: 18px;
-      padding: 12px 18px;
-      border: 1px solid #fce8a4;
-      border-radius: 4px;
-      color: #111;
-      background: #fce8a4;
+
+    a:hover {
+      color: #f2d98a;
+    }
+
+    .dust-field {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      overflow: hidden;
+    }
+
+    .dust {
+      position: absolute;
+      left: calc(var(--x) * 1%);
+      top: calc(var(--y) * 1%);
+      width: var(--size);
+      height: var(--size);
+      border-radius: 999px;
+      background: rgba(219, 166, 52, 0.8);
+      box-shadow: 0 0 18px rgba(219, 166, 52, 0.72);
+      opacity: 0.35;
+      animation: dust-drift var(--duration) linear infinite;
+      animation-delay: var(--delay);
+    }
+
+    @keyframes dust-drift {
+      0% {
+        transform: translate3d(0, 16px, 0);
+        opacity: 0;
+      }
+
+      12% {
+        opacity: 0.35;
+      }
+
+      64% {
+        opacity: 0.5;
+      }
+
+      100% {
+        transform: translate3d(var(--drift), -120vh, 0);
+        opacity: 0;
+      }
+    }
+
+    .site-shell {
+      position: relative;
+      z-index: 1;
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+
+    .topbar {
+      min-height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 0 32px;
+      border-bottom: 1px solid rgba(147, 111, 30, 0.24);
+      background: rgba(5, 4, 3, 0.72);
+      backdrop-filter: blur(10px);
+    }
+
+    .brand {
+      color: #eee6d8;
+      font-size: 17px;
+      font-weight: 700;
+      font-variant: small-caps;
       text-decoration: none;
+    }
+
+    .status-pill {
+      min-width: 118px;
+      padding: 5px 12px;
+      border: 1px solid rgba(147, 111, 30, 0.34);
+      color: #a99a84;
       font-family: Arial, Helvetica, sans-serif;
+      font-size: 11px;
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    .verify-main,
+    .doc-main {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 74px 24px 64px;
+    }
+
+    .verify-frame,
+    .doc-frame {
+      position: relative;
+      width: min(500px, 100%);
+      border: 1px solid rgba(165, 124, 28, 0.64);
+      border-radius: 2px;
+      background: rgba(10, 8, 6, 0.78);
+      box-shadow:
+        0 28px 80px rgba(0, 0, 0, 0.48),
+        0 0 70px rgba(30, 42, 92, 0.14);
+    }
+
+    .verify-frame {
+      padding: 44px 38px 36px;
+      text-align: center;
+    }
+
+    .corner {
+      position: absolute;
+      width: 22px;
+      height: 22px;
+      pointer-events: none;
+    }
+
+    .corner-top-left {
+      top: -1px;
+      left: -1px;
+      border-top: 2px solid #a57c1c;
+      border-left: 2px solid #a57c1c;
+    }
+
+    .corner-top-right {
+      top: -1px;
+      right: -1px;
+      border-top: 2px solid #a57c1c;
+      border-right: 2px solid #a57c1c;
+    }
+
+    .corner-bottom-left {
+      bottom: -1px;
+      left: -1px;
+      border-bottom: 2px solid #a57c1c;
+      border-left: 2px solid #a57c1c;
+    }
+
+    .corner-bottom-right {
+      right: -1px;
+      bottom: -1px;
+      border-right: 2px solid #a57c1c;
+      border-bottom: 2px solid #a57c1c;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: #a77c16;
+      font-size: 13px;
+      font-variant: small-caps;
+    }
+
+    h1 {
+      margin: 0;
+      color: #f4eadb;
+      font-size: 52px;
+      line-height: 0.95;
+      font-weight: 700;
+      text-shadow: 0 0 18px rgba(255, 236, 199, 0.12);
+    }
+
+    .subtitle {
+      margin: 12px 0 0;
+      color: #8d8173;
       font-size: 15px;
+      font-style: italic;
+    }
+
+    .ornament {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 14px;
+      margin: 28px 0 30px;
+      color: #a57c1c;
+    }
+
+    .ornament::before,
+    .ornament::after {
+      height: 1px;
+      content: "";
+      background: linear-gradient(90deg, rgba(165, 124, 28, 0), rgba(165, 124, 28, 0.82));
+    }
+
+    .ornament::after {
+      background: linear-gradient(90deg, rgba(165, 124, 28, 0.82), rgba(165, 124, 28, 0));
+    }
+
+    .link-flow {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 18px;
+      margin-bottom: 24px;
+    }
+
+    .account-mark {
+      display: grid;
+      gap: 8px;
+      justify-items: center;
+      color: #9d7b27;
+      font-size: 11px;
+      font-family: Arial, Helvetica, sans-serif;
+      text-transform: uppercase;
+    }
+
+    .account-icon {
+      width: 64px;
+      height: 64px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(165, 124, 28, 0.44);
+      border-radius: 50%;
+      background:
+        radial-gradient(circle at 34% 28%, rgba(255, 239, 194, 0.22), rgba(255, 239, 194, 0) 28px),
+        linear-gradient(135deg, #2b304f, #15110c 72%);
+      color: #efe3cc;
+      font-size: 28px;
+      font-weight: 700;
+      box-shadow: inset 0 0 24px rgba(0, 0, 0, 0.34);
+    }
+
+    .account-icon.roblox {
+      background:
+        radial-gradient(circle at 36% 30%, rgba(255, 239, 194, 0.25), rgba(255, 239, 194, 0) 28px),
+        linear-gradient(135deg, #643025, #15110c 72%);
+    }
+
+    .link-sigil {
+      color: #a57c1c;
+      font-size: 24px;
+    }
+
+    .verify-copy {
+      max-width: 360px;
+      margin: 0 auto 26px;
+      color: #b7aa99;
+      font-size: 15px;
+    }
+
+    .verify-button,
+    .modal-button {
+      display: inline-flex;
+      min-height: 48px;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 4px;
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      text-decoration: none;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+
+    .verify-button {
+      width: 100%;
+      max-width: 360px;
+      padding: 0 18px;
+      background: #4354ad;
+      color: #fff;
+      box-shadow: 0 14px 34px rgba(67, 84, 173, 0.22);
+    }
+
+    .verify-button:hover {
+      color: #fff;
+      background: #5264c7;
+    }
+
+    .button-mark {
+      width: 15px;
+      height: 15px;
+      margin-right: 10px;
+      border: 2px solid currentColor;
+      transform: rotate(12deg);
+    }
+
+    .legal-links {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px 18px;
+      margin-top: 16px;
+      color: #6f665c;
+      font-size: 13px;
+      font-style: italic;
+    }
+
+    .site-footer {
+      display: flex;
+      justify-content: center;
+      gap: 18px;
+      padding: 18px 24px;
+      color: #4f473e;
+      font-size: 12px;
+    }
+
+    .consent-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 5;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(8px);
+    }
+
+    .consent-modal[hidden] {
+      display: none;
+    }
+
+    .modal-panel {
+      width: min(560px, 100%);
+      border: 1px solid rgba(165, 124, 28, 0.66);
+      border-radius: 2px;
+      background: rgba(11, 9, 7, 0.95);
+      padding: 46px 44px 34px;
+      text-align: center;
+      box-shadow: 0 28px 90px rgba(0, 0, 0, 0.58);
+    }
+
+    .modal-icon {
+      margin: 0 auto 16px;
+      color: #9a936b;
+      font-size: 34px;
+    }
+
+    .modal-panel h2 {
+      margin: 0 0 12px;
+      color: #f4eadb;
+      font-size: 27px;
+      line-height: 1.15;
+    }
+
+    .modal-panel p {
+      margin: 0 auto 22px;
+      max-width: 420px;
+      color: #afa393;
+      font-size: 15px;
+    }
+
+    .modal-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 28px;
+    }
+
+    .modal-button {
+      width: 100%;
+      color: #efe3cc;
+      background: transparent;
+      border-color: rgba(165, 124, 28, 0.44);
+    }
+
+    .modal-button.primary {
+      background: #9c3d2e;
+      border-color: #b75543;
+      color: #fff;
+    }
+
+    .doc-main {
+      align-items: flex-start;
+    }
+
+    .doc-frame {
+      width: min(720px, 100%);
+      padding: 34px 38px 42px;
+    }
+
+    .doc-tabs {
+      display: flex;
+      gap: 18px;
+      border-bottom: 1px solid rgba(165, 124, 28, 0.34);
+      margin-bottom: 28px;
+      padding-bottom: 12px;
+    }
+
+    .doc-tab {
+      min-width: 158px;
+      padding: 9px 14px;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      color: #6f665c;
+      font-size: 13px;
+      font-variant: small-caps;
+      text-align: center;
+      text-decoration: none;
+    }
+
+    .doc-tab.active {
+      border-color: rgba(255, 255, 255, 0.9);
+      color: #d6a824;
+    }
+
+    .effective-date {
+      margin: 0 0 24px;
+      color: #dbc9b5;
+      font-size: 15px;
+    }
+
+    .legal-section {
+      margin-top: 22px;
+    }
+
+    .legal-section h2 {
+      margin: 0 0 8px;
+      color: #a77c16;
+      font-size: 18px;
+      font-variant: small-caps;
+      line-height: 1.25;
+    }
+
+    .legal-section p,
+    .legal-section li {
+      color: #eadfce;
+      font-size: 16px;
+    }
+
+    .legal-section p {
+      margin: 0 0 10px;
+    }
+
+    .legal-section ul {
+      margin: 8px 0 0;
+      padding-left: 21px;
+    }
+
+    .legal-note {
+      margin-top: 26px;
+      padding: 16px 0 16px 18px;
+      border-left: 1px solid rgba(165, 124, 28, 0.64);
+      color: #a79b8b;
+      font-size: 15px;
+      font-style: italic;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .dust {
+        animation: none;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .topbar {
+        padding: 0 18px;
+      }
+
+      .verify-main,
+      .doc-main {
+        padding: 42px 16px 36px;
+      }
+
+      .verify-frame {
+        padding: 36px 22px 30px;
+      }
+
+      h1 {
+        font-size: 42px;
+      }
+
+      .link-flow {
+        gap: 10px;
+      }
+
+      .account-icon {
+        width: 56px;
+        height: 56px;
+        font-size: 24px;
+      }
+
+      .doc-frame {
+        padding: 26px 20px 34px;
+      }
+
+      .doc-tabs {
+        gap: 8px;
+      }
+
+      .doc-tab {
+        min-width: 0;
+        flex: 1;
+        font-size: 12px;
+      }
+
+      .modal-panel {
+        padding: 36px 22px 28px;
+      }
+
+      .modal-actions {
+        grid-template-columns: 1fr;
+      }
+
+      .site-footer {
+        flex-wrap: wrap;
+      }
     }
   </style>
 </head>
 <body>
-  <main>
-    <h1>${title}</h1>
-    ${sections}
-  </main>
+  <div class="dust-field" aria-hidden="true">${renderDustMotes()}</div>
+  <div class="site-shell">
+    <header class="topbar">
+      <a class="brand" href="/oauth/roblox/start">Thornvale</a>
+      <span class="status-pill">Not Verified</span>
+    </header>
+    ${body}
+    <footer class="site-footer">
+      <span>&copy; 2026 Thornvale</span>
+      <a href="/terms">Terms & Conditions</a>
+      <a href="/privacy">Privacy Policy</a>
+    </footer>
+  </div>
+  ${scripts}
 </body>
 </html>`);
 }
 
+function renderVerifyPage(res) {
+  const body = `
+    <main class="verify-main">
+      <section class="verify-frame" aria-labelledby="verify-title">
+        <span class="corner corner-top-left" aria-hidden="true"></span>
+        <span class="corner corner-top-right" aria-hidden="true"></span>
+        <span class="corner corner-bottom-left" aria-hidden="true"></span>
+        <span class="corner corner-bottom-right" aria-hidden="true"></span>
+        <p class="eyebrow">Account</p>
+        <h1 id="verify-title">Verify</h1>
+        <p class="subtitle">link discord &middot; link roblox</p>
+        <div class="ornament" aria-hidden="true">&#9670;</div>
+        <div class="link-flow" aria-label="Account link flow">
+          <div class="account-mark">
+            <span class="account-icon">D</span>
+            <span>Discord</span>
+          </div>
+          <span class="link-sigil" aria-hidden="true">&#9670;</span>
+          <div class="account-mark">
+            <span class="account-icon roblox">R</span>
+            <span>Roblox</span>
+          </div>
+        </div>
+        <p class="verify-copy">Connect your Thornvale Discord and Roblox accounts to unlock verified access and account-linked features.</p>
+        <a class="verify-button" href="/oauth/roblox/start/continue" data-consent-open>
+          <span class="button-mark" aria-hidden="true"></span>
+          Continue with Roblox
+        </a>
+        <nav class="legal-links" aria-label="Legal links">
+          <a href="/terms">Terms & Conditions</a>
+          <a href="/privacy">Privacy Policy</a>
+        </nav>
+      </section>
+    </main>
+    <div class="consent-modal" data-consent-modal hidden>
+      <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="consent-title">
+        <div class="modal-icon" aria-hidden="true">&#9651;</div>
+        <h2 id="consent-title">Before You Verify</h2>
+        <p>Please make sure you have read our <a href="/terms">Terms & Conditions</a> before continuing.</p>
+        <p>By choosing I Agree, you consent to Thornvale collecting and using Discord and Roblox account information for verification.</p>
+        <div class="modal-actions">
+          <button class="modal-button" type="button" data-consent-close>Cancel</button>
+          <a class="modal-button primary" href="/oauth/roblox/start/continue">I Agree</a>
+        </div>
+      </section>
+    </div>`;
+
+  const scripts = `
+  <script>
+    const consentModal = document.querySelector("[data-consent-modal]");
+    const consentOpen = document.querySelector("[data-consent-open]");
+    const consentClose = document.querySelector("[data-consent-close]");
+
+    function closeConsent() {
+      consentModal.hidden = true;
+    }
+
+    consentOpen.addEventListener("click", (event) => {
+      event.preventDefault();
+      consentModal.hidden = false;
+      consentClose.focus();
+    });
+
+    consentClose.addEventListener("click", closeConsent);
+    consentModal.addEventListener("click", (event) => {
+      if (event.target === consentModal) {
+        closeConsent();
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !consentModal.hidden) {
+        closeConsent();
+      }
+    });
+  </script>`;
+
+  renderBasePage(res, "Thornvale Verification", body, { scripts });
+}
+
+function renderLegalSections(sections) {
+  return sections
+    .map((section, index) => `
+      <section class="legal-section">
+        <h2>${index + 1}. ${section.heading}</h2>
+        ${section.body}
+      </section>`)
+    .join("");
+}
+
+function renderLegalPage(res, page) {
+  const sections = renderLegalSections(page.sections);
+  const body = `
+    <main class="doc-main">
+      <article class="doc-frame">
+        <span class="corner corner-top-left" aria-hidden="true"></span>
+        <span class="corner corner-top-right" aria-hidden="true"></span>
+        <span class="corner corner-bottom-left" aria-hidden="true"></span>
+        <span class="corner corner-bottom-right" aria-hidden="true"></span>
+        <nav class="doc-tabs" aria-label="Legal pages">
+          <a class="doc-tab ${page.active === "privacy" ? "active" : ""}" href="/privacy">Privacy Policy</a>
+          <a class="doc-tab ${page.active === "terms" ? "active" : ""}" href="/terms">Terms of Service</a>
+        </nav>
+        <p class="effective-date">Effective Date: ${LEGAL_EFFECTIVE_DATE}</p>
+        ${sections}
+        <p class="legal-note">${page.note}</p>
+      </article>
+    </main>`;
+
+  renderBasePage(res, page.title, body);
+}
+
 app.get("/", (req, res) => {
-  sendInfoPage(res, "Thornvale Verification", [
-    {
-      heading: "Account Linking",
-      body: "This service connects a Roblox account to a Discord account so Thornvale can apply verification, staff tools, and role sync features.",
-    },
-    {
-      heading: "Start",
-      body: "Start the Roblox OAuth review flow at <a href=\"/oauth/roblox/start\">/oauth/roblox/start</a>. Thornvale members should use the verification button in the Discord server so their Discord role can be applied.",
-    },
-  ]);
+  renderVerifyPage(res);
 });
 
 app.get("/oauth/roblox/start", (req, res) => {
-  sendInfoPage(res, "Thornvale Verification", [
-    {
-      heading: "Roblox Account Verification",
-      body: "Thornvale Verification uses Roblox OAuth to confirm the Roblox account you choose to connect. The public review flow below verifies that OAuth returns a valid Roblox account without changing Discord roles.",
-    },
-    {
-      heading: "Continue",
-      body: "Click the button below to continue to Roblox and approve the requested basic profile access.<br><a class=\"button\" href=\"/oauth/roblox/start/continue\">Continue with Roblox</a>",
-    },
-    {
-      heading: "For Thornvale Members",
-      body: "Members should start verification from the Thornvale Discord server. That private Discord flow applies the verified role after Roblox OAuth succeeds.",
-    },
-  ]);
+  renderVerifyPage(res);
 });
 
 app.get("/oauth/roblox/start/continue", async (req, res) => {
@@ -3218,49 +3850,83 @@ app.get("/oauth/roblox/start/continue", async (req, res) => {
 });
 
 app.get("/privacy", (req, res) => {
-  sendInfoPage(res, "Privacy Policy", [
-    {
-      heading: "Information We Collect",
-      body: "When you verify, we store your Discord user ID, Discord tag, Roblox user ID, Roblox username, Roblox display name, verification timestamps, and last in-game activity timestamps.",
-    },
-    {
-      heading: "How We Use Information",
-      body: "This information is used only to connect Roblox and Discord accounts, apply verified roles, support role sync, and help Thornvale staff manage account verification.",
-    },
-    {
-      heading: "Data Sharing",
-      body: "We do not sell verification data. Data is used by Thornvale systems and staff for moderation, account linking, and game integration.",
-    },
-    {
-      heading: "Removal",
-      body: "You may ask Thornvale staff to unlink your account. Unlinking removes the stored Roblox and Discord verification link from the active verification database.",
-    },
-    {
-      heading: "Contact",
-      body: "For privacy questions or unlink requests, contact staff in the Thornvale Discord server.",
-    },
-  ]);
+  renderLegalPage(res, {
+    title: "Thornvale Privacy Policy",
+    active: "privacy",
+    note: "By verifying your account, you acknowledge and consent to this Privacy Policy.",
+    sections: [
+      {
+        heading: "Overview",
+        body: "<p>Thornvale Verification is a Discord and Roblox account-linking service used to confirm members, unlock verified access, and support account-linked game systems.</p>",
+      },
+      {
+        heading: "Information We Collect",
+        body: "<ul><li>Discord data: user ID, username, display name, and avatar when available.</li><li>Roblox data: user ID, username, display name, and OAuth verification result.</li><li>Verification data: linked account IDs, verification timestamps, role-sync state, and last in-game activity timestamps.</li></ul><p>We do not collect passwords or payment information.</p>",
+      },
+      {
+        heading: "How We Use Your Data",
+        body: "<p>We use linked account information to apply verified roles, support account recovery, manage role sync, assist moderation, and connect Roblox game systems with the Thornvale Discord community.</p>",
+      },
+      {
+        heading: "Data Retention",
+        body: "<p>We retain verification records while your account remains linked or while they are needed for Thornvale moderation, security, or game functionality. You may request unlinking through Thornvale staff.</p>",
+      },
+      {
+        heading: "Data Security",
+        body: "<p>Verification data is stored on secured systems and is accessible only to authorized Thornvale systems and staff members who need it for account verification, support, or moderation.</p>",
+      },
+      {
+        heading: "Sharing and Disclosure",
+        body: "<p>We do not sell your data. Account-linking data may be used internally by Thornvale staff and systems for verification, moderation, and game integration.</p>",
+      },
+      {
+        heading: "Your Rights",
+        body: "<p>You may request unlinking or deletion of your verification record by opening a support request with Thornvale staff. Some moderation records may be retained when needed for security or rule enforcement.</p>",
+      },
+      {
+        heading: "Compliance",
+        body: "<p>We operate this service to support Thornvale account verification and follow applicable United States privacy and platform requirements.</p>",
+      },
+    ],
+  });
 });
 
 app.get("/terms", (req, res) => {
-  sendInfoPage(res, "Terms of Service", [
-    {
-      heading: "Use of Service",
-      body: "Thornvale Verification is provided to link Roblox and Discord accounts for access, verification, role sync, and related game systems.",
-    },
-    {
-      heading: "User Responsibilities",
-      body: "You agree not to abuse, bypass, impersonate, or interfere with the verification process. Staff may unlink or revoke access when needed for moderation or security.",
-    },
-    {
-      heading: "Availability",
-      body: "The service is provided as-is and may be changed, paused, or removed as Thornvale systems evolve.",
-    },
-    {
-      heading: "Contact",
-      body: "For questions about these terms, contact staff in the Thornvale Discord server.",
-    },
-  ]);
+  renderLegalPage(res, {
+    title: "Thornvale Terms of Service",
+    active: "terms",
+    note: "By linking your account, you agree to these Terms of Service.",
+    sections: [
+      {
+        heading: "Acceptance",
+        body: "<p>By using Thornvale Verification or linking your Discord and Roblox accounts, you agree to these Terms of Service.</p>",
+      },
+      {
+        heading: "Service Description",
+        body: "<p>Thornvale Verification links your Discord account with your Roblox account to enable verified access, role sync, account support, moderation tools, and related game functionality.</p>",
+      },
+      {
+        heading: "User Responsibilities",
+        body: "<ul><li>Follow Discord's Terms of Service and Roblox's Terms of Use.</li><li>Provide accurate account information when linking accounts.</li><li>Do not abuse, exploit, bypass, impersonate, or interfere with the verification system.</li></ul>",
+      },
+      {
+        heading: "Suspension and Revocation",
+        body: "<p>Thornvale staff may unlink accounts, suspend verification, revoke roles, or restrict access if needed for moderation, security, abuse prevention, or rule enforcement.</p>",
+      },
+      {
+        heading: "No Warranty",
+        body: "<p>This service is provided as-is without warranties of any kind. Thornvale may change, pause, or remove the verification system as its game and community systems evolve.</p>",
+      },
+      {
+        heading: "Governing Law",
+        body: "<p>These Terms are governed by the laws of the United States of America, without regard to conflict of law principles.</p>",
+      },
+      {
+        heading: "Contact",
+        body: "<p>For questions about these Terms, contact Thornvale staff through the Thornvale Discord server.</p>",
+      },
+    ],
+  });
 });
 
 const PORT = process.env.PORT || 3000;
