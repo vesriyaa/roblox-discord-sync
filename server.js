@@ -119,6 +119,7 @@ const EAGER_DEFERRED_COMMANDS = new Set([
 ]);
 const MEMBER_COMMAND_ROLE_ID = process.env.MEMBER_COMMAND_ROLE_ID || "1415902349192331383";
 const MEMBER_ALLOWED_COMMANDS = new Set(["verify", "getroles"]);
+const REVIEW_DISCORD_ID_PREFIX = "oauth-review:";
 // 🔹 ROLE IDS
 // 🔹 DISCORD ROLE SWAP
 // 🔹 Team → Role mapping
@@ -362,6 +363,24 @@ async function createRobloxVerificationLink(interaction, member) {
     ok: true,
     authorizationUrl: buildRobloxAuthorizeUrl(session),
   };
+}
+
+function isRobloxReviewSession(session) {
+  return typeof session?.discordId === "string"
+    && session.discordId.startsWith(REVIEW_DISCORD_ID_PREFIX);
+}
+
+async function createRobloxReviewAuthorizationUrl() {
+  const session = {
+    state: createRandomToken(32),
+    nonce: createRandomToken(24),
+    codeVerifier: createRandomToken(64),
+    discordId: `${REVIEW_DISCORD_ID_PREFIX}${createRandomToken(16)}`,
+    discordTag: "Roblox OAuth reviewer",
+  };
+  await verificationDb.createOAuthSession(session);
+
+  return buildRobloxAuthorizeUrl(session);
 }
 
 async function sendRobloxVerificationLink(interaction, member) {
@@ -2589,6 +2608,14 @@ app.get("/oauth/roblox/callback", async (req, res) => {
       return sendOAuthHtml(res, "Verification Failed", "Roblox did not return a usable user id.", 400);
     }
 
+    if (isRobloxReviewSession(session)) {
+      return sendOAuthHtml(
+        res,
+        "Verification Flow Complete",
+        "Roblox OAuth returned a valid account. This public review flow does not change Discord roles; Thornvale members complete linking from the verification button inside Discord."
+      );
+    }
+
     const existingRobloxLink = await verificationDb.getVerificationByRobloxUserId(identity.robloxUserId);
     if (existingRobloxLink && existingRobloxLink.discordId !== session.discordId) {
       return sendOAuthHtml(
@@ -3133,9 +3160,32 @@ app.get("/", (req, res) => {
     },
     {
       heading: "Start",
-      body: "Use the verification button in the Thornvale Discord server to begin Roblox OAuth verification.",
+      body: "Start the Roblox OAuth review flow at <a href=\"/oauth/roblox/start\">/oauth/roblox/start</a>. Thornvale members should use the verification button in the Discord server so their Discord role can be applied.",
     },
   ]);
+});
+
+app.get("/oauth/roblox/start", async (req, res) => {
+  if (!isRobloxOAuthConfigured()) {
+    return sendOAuthHtml(
+      res,
+      "Verification Unavailable",
+      "Roblox OAuth is not configured yet. Please try again later.",
+      503
+    );
+  }
+
+  try {
+    return res.redirect(await createRobloxReviewAuthorizationUrl());
+  } catch (err) {
+    console.error("Roblox OAuth review start error:", err);
+    return sendOAuthHtml(
+      res,
+      "Verification Unavailable",
+      "Something went wrong while starting Roblox OAuth verification. Please try again.",
+      500
+    );
+  }
 });
 
 app.get("/privacy", (req, res) => {
