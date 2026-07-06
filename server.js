@@ -3141,6 +3141,18 @@ function sendInfoPage(res, title, bodySections) {
     a {
       color: #fce8a4;
     }
+    .button {
+      display: inline-block;
+      margin-top: 18px;
+      padding: 12px 18px;
+      border: 1px solid #fce8a4;
+      border-radius: 4px;
+      color: #111;
+      background: #fce8a4;
+      text-decoration: none;
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 15px;
+    }
   </style>
 </head>
 <body>
@@ -3165,7 +3177,24 @@ app.get("/", (req, res) => {
   ]);
 });
 
-app.get("/oauth/roblox/start", async (req, res) => {
+app.get("/oauth/roblox/start", (req, res) => {
+  sendInfoPage(res, "Thornvale Verification", [
+    {
+      heading: "Roblox Account Verification",
+      body: "Thornvale Verification uses Roblox OAuth to confirm the Roblox account you choose to connect. The public review flow below verifies that OAuth returns a valid Roblox account without changing Discord roles.",
+    },
+    {
+      heading: "Continue",
+      body: "Click the button below to continue to Roblox and approve the requested basic profile access.<br><a class=\"button\" href=\"/oauth/roblox/start/continue\">Continue with Roblox</a>",
+    },
+    {
+      heading: "For Thornvale Members",
+      body: "Members should start verification from the Thornvale Discord server. That private Discord flow applies the verified role after Roblox OAuth succeeds.",
+    },
+  ]);
+});
+
+app.get("/oauth/roblox/start/continue", async (req, res) => {
   if (!isRobloxOAuthConfigured()) {
     return sendOAuthHtml(
       res,
