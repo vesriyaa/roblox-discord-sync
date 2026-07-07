@@ -620,13 +620,32 @@ function buildRelayMessagePayload(body) {
     : body?.embeds
       ? [body.embeds]
       : [];
+  const hasFallbackEmbed = !body?.embeds && (
+    typeof body?.title === "string"
+    || typeof body?.description === "string"
+    || (Array.isArray(body?.fields) && body.fields.length > 0)
+  );
+  const fallbackEmbed = hasFallbackEmbed
+    ? Object.fromEntries(Object.entries({
+      title: body.title,
+      description: body.description,
+      color: body.color,
+      fields: Array.isArray(body.fields) ? body.fields : undefined,
+    }).filter(([, value]) => value !== undefined))
+    : null;
 
-  if (typeof body?.content === "string" && body.content.length > 0) {
-    messagePayload.content = body.content;
+  const content = formatOptionalString(
+    body?.content ?? body?.message ?? body?.text ?? body?.summary
+  );
+
+  if (content) {
+    messagePayload.content = content.slice(0, 2000);
   }
 
   if (embeds.length > 0) {
     messagePayload.embeds = embeds;
+  } else if (fallbackEmbed) {
+    messagePayload.embeds = [fallbackEmbed];
   }
 
   if (body?.allowedMentions) {
@@ -1710,6 +1729,30 @@ async function postAdminActionTranscript(lines) {
   });
 }
 
+function getStudioQueueStatus() {
+  const countRecords = (records, status) =>
+    Array.from(records.values()).filter((record) => record?.status === status).length;
+
+  return {
+    ok: true,
+    botReady: client.isReady(),
+    uptimeSeconds: Math.floor(process.uptime()),
+    adminActions: {
+      pending: countRecords(adminActions, "pending"),
+      claimed: countRecords(adminActions, "claimed"),
+      completed: countRecords(adminActions, "completed"),
+      failed: countRecords(adminActions, "failed"),
+    },
+    talentLookups: {
+      pending: countRecords(talentLookupRequests, "pending"),
+      claimed: countRecords(talentLookupRequests, "claimed"),
+      completed: countRecords(talentLookupRequests, "completed"),
+      failed: countRecords(talentLookupRequests, "failed"),
+    },
+    eventSessions: eventSessions.size,
+    revaluationSessions: revaluationSessions.size,
+  };
+}
 async function logAdminActionRequest(actionData, duplicateRecord = null) {
   const lines = [
     `**Admin Action ${duplicateRecord ? "Duplicate Request" : "Queued"}**`,
@@ -2158,10 +2201,7 @@ async function handleEventSummaryCommand(interaction, mode, member) {
   const eventId = formatOptionalString(interaction.options.getString("eventid"));
   const session = eventSessions.get(eventId);
   if (!session) {
-    return interaction.reply({
-      content: "❌ That event ID was not found in the bot cache yet.",
-      ephemeral: true,
-    });
+    return sendInteractionResponse(interaction, "That event ID was not found in the bot cache yet.");
   }
 
   try {
@@ -3009,12 +3049,20 @@ app.post("/relayWebhook/:service", async (req, res) => {
       return res.status(500).send("Relay channel unavailable");
     }
 
-    await channel.send(messagePayload);
-    res.send("Relay posted");
+    const message = await channel.send(messagePayload);
+    res.json({
+      ok: true,
+      service,
+      channelId: message.channelId,
+      messageId: message.id,
+    });
 
   } catch (err) {
     console.error("Relay webhook error:", err);
-    res.status(500).send("Error posting relay webhook");
+    res.status(500).json({
+      ok: false,
+      error: "Error posting relay webhook",
+    });
   }
 });
 
@@ -3029,12 +3077,18 @@ app.post("/eventSessions/sync", async (req, res) => {
     return res.status(400).send("Missing event session payload");
   }
 
+  let discordSynced = false;
+  let syncError = null;
   if (client.isReady()) {
     try {
       await syncEventAnnouncement(session);
+      discordSynced = true;
     } catch (err) {
       console.error("Event announcement sync error:", err);
+      syncError = "Event announcement sync failed";
     }
+  } else {
+    syncError = "Bot not ready";
   }
 
   res.json({
@@ -3042,6 +3096,8 @@ app.post("/eventSessions/sync", async (req, res) => {
     eventId: session.eventId,
     active: session.active,
     participants: session.participants.length,
+    discordSynced,
+    syncError,
   });
 });
 
@@ -3056,12 +3112,18 @@ app.post("/revaluationSessions/sync", async (req, res) => {
     return res.status(400).send("Missing revaluation session payload");
   }
 
+  let discordSynced = false;
+  let syncError = null;
   if (client.isReady()) {
     try {
       await syncRevaluationStatus(session);
+      discordSynced = true;
     } catch (err) {
       console.error("Revaluation status sync error:", err);
+      syncError = "Revaluation status sync failed";
     }
+  } else {
+    syncError = "Bot not ready";
   }
 
   res.json({
@@ -3069,9 +3131,22 @@ app.post("/revaluationSessions/sync", async (req, res) => {
     sessionId: session.sessionId,
     active: session.active,
     participants: session.participants.length,
+    discordSynced,
+    syncError,
   });
 });
 
+app.post("/studio/status", (req, res) => {
+
+  if (req.headers["x-api-key"] !== API_KEY) {
+    return res.status(403).send("Unauthorized");
+  }
+
+  cleanupAdminActionRecords();
+  cleanupTalentLookupRecords();
+
+  res.json(getStudioQueueStatus());
+});
 app.post("/adminActions/claim", (req, res) => {
 
   if (req.headers["x-api-key"] !== API_KEY) {
