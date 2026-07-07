@@ -23,6 +23,10 @@ const {
   BOT_TOKEN,
   BOT_TRANSCRIPTS_CHANNEL_ID,
   DEATH_CHANNEL_ID,
+  DISCORD_OAUTH_CLIENT_ID,
+  DISCORD_OAUTH_CLIENT_SECRET,
+  DISCORD_OAUTH_REDIRECT_URI,
+  DISCORD_OAUTH_SCOPES,
   ENVISIONED_ROLE_ID,
   EVENT_LOGS_CHANNEL_ID,
   EVENT_SESSION_RETENTION_LIMIT,
@@ -265,10 +269,38 @@ function createCodeChallenge(codeVerifier) {
   return base64Url(crypto.createHash("sha256").update(codeVerifier).digest());
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function isRobloxOAuthConfigured() {
   return ROBLOX_OAUTH_CLIENT_ID
     && ROBLOX_OAUTH_CLIENT_SECRET
     && ROBLOX_OAUTH_REDIRECT_URI;
+}
+
+function isDiscordOAuthConfigured() {
+  return DISCORD_OAUTH_CLIENT_ID
+    && DISCORD_OAUTH_CLIENT_SECRET
+    && DISCORD_OAUTH_REDIRECT_URI;
+}
+
+function buildDiscordAuthorizeUrl(session) {
+  const params = new URLSearchParams({
+    client_id: DISCORD_OAUTH_CLIENT_ID,
+    redirect_uri: DISCORD_OAUTH_REDIRECT_URI,
+    response_type: "code",
+    scope: DISCORD_OAUTH_SCOPES,
+    state: session.state,
+    prompt: "consent",
+  });
+
+  return `https://discord.com/oauth2/authorize?${params.toString()}`;
 }
 
 function buildRobloxAuthorizeUrl(session) {
@@ -284,6 +316,15 @@ function buildRobloxAuthorizeUrl(session) {
   });
 
   return `https://apis.roblox.com/oauth/v1/authorize?${params.toString()}`;
+}
+
+async function createDiscordAuthorizationUrl() {
+  const session = {
+    state: createRandomToken(32),
+  };
+  await verificationDb.createDiscordOAuthSession(session);
+
+  return buildDiscordAuthorizeUrl(session);
 }
 
 function buildVerificationPanelPayload() {
@@ -383,6 +424,19 @@ async function createRobloxReviewAuthorizationUrl() {
   return buildRobloxAuthorizeUrl(session);
 }
 
+async function createRobloxAuthorizationUrlForDiscord(discordIdentity) {
+  const session = {
+    state: createRandomToken(32),
+    nonce: createRandomToken(24),
+    codeVerifier: createRandomToken(64),
+    discordId: discordIdentity.id,
+    discordTag: discordIdentity.tag,
+  };
+  await verificationDb.createOAuthSession(session);
+
+  return buildRobloxAuthorizeUrl(session);
+}
+
 async function sendRobloxVerificationLink(interaction, member) {
   const result = await createRobloxVerificationLink(interaction, member);
   if (!result.ok) {
@@ -420,6 +474,30 @@ async function exchangeRobloxOAuthCode(code, session) {
   return payload;
 }
 
+async function exchangeDiscordOAuthCode(code) {
+  const response = await fetch("https://discord.com/api/v10/oauth2/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      client_id: DISCORD_OAUTH_CLIENT_ID,
+      client_secret: DISCORD_OAUTH_CLIENT_SECRET,
+      redirect_uri: DISCORD_OAUTH_REDIRECT_URI,
+    }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = payload.error_description || payload.error || "Discord token exchange failed.";
+    throw new Error(message);
+  }
+
+  return payload;
+}
+
 async function fetchRobloxUserInfo(accessToken) {
   const response = await fetch("https://apis.roblox.com/oauth/v1/userinfo", {
     headers: {
@@ -430,6 +508,22 @@ async function fetchRobloxUserInfo(accessToken) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const message = payload.error_description || payload.error || "Roblox userinfo request failed.";
+    throw new Error(message);
+  }
+
+  return payload;
+}
+
+async function fetchDiscordUserInfo(accessToken) {
+  const response = await fetch("https://discord.com/api/v10/users/@me", {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = payload.error_description || payload.error || "Discord userinfo request failed.";
     throw new Error(message);
   }
 
@@ -449,27 +543,52 @@ function getRobloxIdentity(userInfo) {
   };
 }
 
+function getDiscordIdentity(userInfo) {
+  const id = userInfo?.id ? String(userInfo.id) : "";
+  if (!id) {
+    return null;
+  }
+
+  const username = userInfo.username || "";
+  const discriminator = userInfo.discriminator && userInfo.discriminator !== "0"
+    ? `#${userInfo.discriminator}`
+    : "";
+  const globalName = userInfo.global_name || userInfo.display_name || "";
+
+  return {
+    id,
+    username,
+    displayName: globalName || username,
+    tag: `${username}${discriminator}` || id,
+  };
+}
+
+function getPublicReviewDiscordIdentity(discordIdentity) {
+  return {
+    id: `${REVIEW_DISCORD_ID_PREFIX}${createRandomToken(16)}`,
+    tag: `Discord OAuth reviewer: ${discordIdentity.tag}`,
+  };
+}
+
+async function fetchThornvaleMember(discordId) {
+  if (!GUILD_ID) {
+    return null;
+  }
+
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    return await guild.members.fetch(discordId);
+  } catch {
+    return null;
+  }
+}
+
 function sendOAuthHtml(res, title, message, statusCode = 200) {
-  return res.status(statusCode).send(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${title}</title>
-  <style>
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #101216; color: #f5f5f5; font-family: Georgia, serif; }
-    main { width: min(560px, calc(100vw - 40px)); border-left: 2px solid #2fb8df; padding: 24px 28px; background: rgba(255,255,255,0.035); }
-    h1 { margin: 0 0 12px; font-size: 28px; font-weight: 500; }
-    p { margin: 0; line-height: 1.55; color: #cfd6e3; }
-  </style>
-</head>
-<body>
-  <main>
-    <h1>${title}</h1>
-    <p>${message}</p>
-  </main>
-</body>
-</html>`);
+  return renderResultPage(res, {
+    title,
+    message,
+    statusCode,
+  });
 }
 
 async function sendVerificationCompletionFollowUp(verificationRequest) {
@@ -2612,7 +2731,7 @@ app.get("/oauth/roblox/callback", async (req, res) => {
       return sendOAuthHtml(
         res,
         "Verification Flow Complete",
-        "Roblox OAuth returned a valid account. This public review flow does not change Discord roles; Thornvale members complete linking from the verification button inside Discord."
+        "Discord OAuth and Roblox OAuth returned valid accounts. This public review flow does not change Discord roles unless the Discord account is already in the Thornvale server."
       );
     }
 
@@ -3139,8 +3258,9 @@ function renderDustMotes() {
 
 function renderBasePage(res, title, body, options = {}) {
   const scripts = options.scripts || "";
+  const statusLabel = options.statusLabel || "Not Verified";
 
-  res.type("html").send(`<!doctype html>
+  res.status(options.statusCode || 200).type("html").send(`<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -3686,6 +3806,321 @@ function renderBasePage(res, title, body, options = {}) {
         flex-wrap: wrap;
       }
     }
+
+    /* Thornvale menu style */
+    html {
+      background: #070706;
+    }
+
+    body {
+      background:
+        linear-gradient(90deg, rgba(0, 0, 0, 0.38), rgba(0, 0, 0, 0.74)),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 22%),
+        repeating-linear-gradient(108deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 96px),
+        radial-gradient(circle at 72% 26%, rgba(255, 255, 255, 0.07), transparent 22rem),
+        #090806;
+      color: rgba(255, 255, 255, 0.92);
+    }
+
+    body::before {
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0) 130px),
+        radial-gradient(circle at 28% 60%, rgba(255, 255, 255, 0.045), transparent 28rem);
+    }
+
+    a {
+      color: rgba(255, 255, 255, 0.88);
+      text-decoration-color: rgba(255, 255, 255, 0.38);
+    }
+
+    a:hover {
+      color: #fff;
+      text-decoration-color: rgba(255, 255, 255, 0.78);
+    }
+
+    .dust {
+      background: rgba(255, 255, 255, 0.72);
+      box-shadow: 0 0 16px rgba(255, 255, 255, 0.36);
+      opacity: 0.22;
+    }
+
+    .topbar {
+      min-height: 52px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.11);
+      background: rgba(0, 0, 0, 0.28);
+      backdrop-filter: blur(6px);
+    }
+
+    .brand {
+      color: rgba(255, 255, 255, 0.9);
+      font-size: 20px;
+      font-style: italic;
+      font-variant: normal;
+      font-weight: 400;
+    }
+
+    .status-pill {
+      border: 0;
+      color: rgba(255, 255, 255, 0.52);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 13px;
+      text-transform: none;
+    }
+
+    .verify-main,
+    .doc-main,
+    .result-main {
+      align-items: flex-start;
+      justify-content: flex-start;
+      padding: clamp(28px, 7vw, 72px) clamp(26px, 8vw, 92px) 54px;
+    }
+
+    .verify-frame,
+    .doc-frame,
+    .result-panel {
+      width: min(860px, 100%);
+      border: 0;
+      border-radius: 0;
+      background: linear-gradient(90deg, rgba(0, 0, 0, 0.26), rgba(0, 0, 0, 0.05));
+      box-shadow: none;
+      text-align: left;
+    }
+
+    .verify-frame,
+    .result-panel {
+      padding: 0;
+    }
+
+    .corner,
+    .ornament,
+    .link-sigil,
+    .button-mark {
+      display: none;
+    }
+
+    .eyebrow,
+    .effective-date {
+      color: rgba(255, 255, 255, 0.74);
+      font-size: 18px;
+      font-variant: normal;
+    }
+
+    h1 {
+      color: rgba(255, 255, 255, 0.96);
+      font-size: clamp(38px, 7vw, 62px);
+      font-style: italic;
+      font-weight: 400;
+      line-height: 1;
+      text-shadow: 0 2px 18px rgba(0, 0, 0, 0.72);
+    }
+
+    .subtitle {
+      margin-top: 8px;
+      color: rgba(255, 255, 255, 0.66);
+      font-size: 17px;
+    }
+
+    .link-flow {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0;
+      width: min(720px, 100%);
+      margin: 34px 0 26px;
+      border-top: 1px solid rgba(255, 255, 255, 0.22);
+    }
+
+    .account-mark {
+      min-height: 64px;
+      display: grid;
+      grid-template-columns: 52px 1fr;
+      gap: 16px;
+      align-items: center;
+      justify-items: stretch;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.17);
+      color: rgba(255, 255, 255, 0.88);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 18px;
+      text-transform: none;
+    }
+
+    .account-icon,
+    .account-icon.roblox {
+      width: auto;
+      height: auto;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
+      color: rgba(255, 255, 255, 0.5);
+      font-size: 18px;
+      font-weight: 400;
+    }
+
+    .account-text {
+      display: grid;
+      gap: 2px;
+    }
+
+    .account-detail {
+      color: rgba(255, 255, 255, 0.52);
+      font-size: 13px;
+    }
+
+    .verify-copy,
+    .result-message {
+      max-width: 620px;
+      margin: 0 0 26px;
+      color: rgba(255, 255, 255, 0.66);
+      font-size: 16px;
+    }
+
+    .verify-button,
+    .modal-button,
+    .result-action {
+      min-height: 44px;
+      border: 1px solid rgba(255, 255, 255, 0.36);
+      border-radius: 0;
+      background: rgba(255, 255, 255, 0.06);
+      color: rgba(255, 255, 255, 0.92);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 15px;
+      font-weight: 400;
+      text-transform: none;
+    }
+
+    .verify-button,
+    .result-action {
+      width: min(360px, 100%);
+      max-width: none;
+      justify-content: flex-start;
+      padding: 0 18px;
+      box-shadow: none;
+    }
+
+    .verify-button:hover,
+    .modal-button:hover,
+    .result-action:hover {
+      background: rgba(255, 255, 255, 0.12);
+      color: #fff;
+    }
+
+    .legal-links {
+      justify-content: flex-start;
+      color: rgba(255, 255, 255, 0.44);
+    }
+
+    .site-footer {
+      justify-content: flex-start;
+      padding: 18px clamp(26px, 8vw, 92px);
+      color: rgba(255, 255, 255, 0.32);
+    }
+
+    .consent-modal {
+      background: rgba(0, 0, 0, 0.72);
+    }
+
+    .modal-panel {
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 0;
+      background: rgba(7, 7, 6, 0.92);
+      text-align: left;
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.56);
+    }
+
+    .modal-icon {
+      display: none;
+    }
+
+    .modal-panel h2,
+    .legal-section h2,
+    .result-panel h1 {
+      color: rgba(255, 255, 255, 0.92);
+      font-style: normal;
+      font-variant: normal;
+      font-weight: 400;
+    }
+
+    .modal-panel p,
+    .legal-section p,
+    .legal-section li {
+      color: rgba(255, 255, 255, 0.68);
+    }
+
+    .modal-actions {
+      width: min(390px, 100%);
+    }
+
+    .modal-button.primary {
+      border-color: rgba(255, 255, 255, 0.5);
+      background: rgba(255, 255, 255, 0.14);
+      color: #fff;
+    }
+
+    .doc-frame {
+      padding: 0;
+    }
+
+    .doc-tabs {
+      width: min(620px, 100%);
+      gap: 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+    }
+
+    .doc-tab {
+      min-width: 150px;
+      border: 0;
+      border-bottom: 1px solid transparent;
+      border-radius: 0;
+      color: rgba(255, 255, 255, 0.42);
+      font-variant: normal;
+      text-align: left;
+    }
+
+    .doc-tab.active {
+      border-color: rgba(255, 255, 255, 0.84);
+      color: rgba(255, 255, 255, 0.9);
+    }
+
+    .legal-section {
+      width: min(720px, 100%);
+      margin-top: 24px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    .legal-note {
+      width: min(720px, 100%);
+      border-left-color: rgba(255, 255, 255, 0.32);
+      color: rgba(255, 255, 255, 0.5);
+    }
+
+    @media (max-width: 640px) {
+      .verify-main,
+      .doc-main,
+      .result-main {
+        padding: 32px 22px 42px;
+      }
+
+      .verify-frame {
+        padding: 0;
+      }
+
+      .topbar {
+        padding: 0 22px;
+      }
+
+      .link-flow {
+        margin-top: 26px;
+      }
+
+      .account-mark {
+        grid-template-columns: 38px 1fr;
+      }
+
+      .site-footer {
+        padding: 18px 22px;
+      }
+    }
   </style>
 </head>
 <body>
@@ -3693,7 +4128,7 @@ function renderBasePage(res, title, body, options = {}) {
   <div class="site-shell">
     <header class="topbar">
       <a class="brand" href="/oauth/roblox/start">Thornvale</a>
-      <span class="status-pill">Not Verified</span>
+      <span class="status-pill">${escapeHtml(statusLabel)}</span>
     </header>
     ${body}
     <footer class="site-footer">
@@ -3715,25 +4150,30 @@ function renderVerifyPage(res) {
         <span class="corner corner-top-right" aria-hidden="true"></span>
         <span class="corner corner-bottom-left" aria-hidden="true"></span>
         <span class="corner corner-bottom-right" aria-hidden="true"></span>
-        <p class="eyebrow">Account</p>
-        <h1 id="verify-title">Verify</h1>
-        <p class="subtitle">link discord &middot; link roblox</p>
+        <h1 id="verify-title">Thornvale Verification</h1>
+        <p class="subtitle">Connect Discord first, then Roblox.</p>
         <div class="ornament" aria-hidden="true">&#9670;</div>
         <div class="link-flow" aria-label="Account link flow">
           <div class="account-mark">
-            <span class="account-icon">D</span>
-            <span>Discord</span>
+            <span class="account-icon">01</span>
+            <span class="account-text">
+              <span>Discord Account</span>
+              <span class="account-detail">Authorize your Discord identity through Discord OAuth.</span>
+            </span>
           </div>
           <span class="link-sigil" aria-hidden="true">&#9670;</span>
           <div class="account-mark">
-            <span class="account-icon roblox">R</span>
-            <span>Roblox</span>
+            <span class="account-icon roblox">02</span>
+            <span class="account-text">
+              <span>Roblox Account</span>
+              <span class="account-detail">Approve Roblox profile access to finish the account link.</span>
+            </span>
           </div>
         </div>
-        <p class="verify-copy">Connect your Thornvale Discord and Roblox accounts to unlock verified access and account-linked features.</p>
-        <a class="verify-button" href="/oauth/roblox/start/continue" data-consent-open>
+        <p class="verify-copy">Thornvale uses this link to verify account ownership, apply Discord access when available, and support account-linked game systems.</p>
+        <a class="verify-button" href="/oauth/discord/start" data-consent-open>
           <span class="button-mark" aria-hidden="true"></span>
-          Continue with Roblox
+          Connect Discord
         </a>
         <nav class="legal-links" aria-label="Legal links">
           <a href="/terms">Terms & Conditions</a>
@@ -3749,7 +4189,7 @@ function renderVerifyPage(res) {
         <p>By choosing I Agree, you consent to Thornvale collecting and using Discord and Roblox account information for verification.</p>
         <div class="modal-actions">
           <button class="modal-button" type="button" data-consent-close>Cancel</button>
-          <a class="modal-button primary" href="/oauth/roblox/start/continue">I Agree</a>
+          <a class="modal-button primary" href="/oauth/discord/start">I Agree</a>
         </div>
       </section>
     </div>`;
@@ -3784,6 +4224,28 @@ function renderVerifyPage(res) {
   </script>`;
 
   renderBasePage(res, "Thornvale Verification", body, { scripts });
+}
+
+function renderResultPage(res, page) {
+  const actionHref = page.actionHref || "/oauth/roblox/start";
+  const actionText = page.actionText || "Return to Verification";
+  const title = escapeHtml(page.title);
+  const message = escapeHtml(page.message);
+  const statusLabel = /complete|linked|success/i.test(page.title) ? "Verified" : "Not Verified";
+  const body = `
+    <main class="result-main">
+      <section class="result-panel" aria-labelledby="result-title">
+        <p class="eyebrow">Verification</p>
+        <h1 id="result-title">${title}</h1>
+        <p class="result-message">${message}</p>
+        <a class="result-action" href="${escapeHtml(actionHref)}">${escapeHtml(actionText)}</a>
+      </section>
+    </main>`;
+
+  renderBasePage(res, title, body, {
+    statusCode: page.statusCode || 200,
+    statusLabel,
+  });
 }
 
 function renderLegalSections(sections) {
@@ -3824,6 +4286,78 @@ app.get("/", (req, res) => {
 
 app.get("/oauth/roblox/start", (req, res) => {
   renderVerifyPage(res);
+});
+
+app.get("/oauth/discord/start", async (req, res) => {
+  if (!isDiscordOAuthConfigured()) {
+    return sendOAuthHtml(
+      res,
+      "Discord Setup Needed",
+      "Discord OAuth is not configured yet. Add the Discord redirect URL and set the Discord OAuth client ID and secret before using this public account-linking flow.",
+      503
+    );
+  }
+
+  if (!isRobloxOAuthConfigured()) {
+    return sendOAuthHtml(
+      res,
+      "Verification Unavailable",
+      "Roblox OAuth is not configured yet. Please try again later.",
+      503
+    );
+  }
+
+  try {
+    return res.redirect(await createDiscordAuthorizationUrl());
+  } catch (err) {
+    console.error("Discord OAuth start error:", err);
+    return sendOAuthHtml(
+      res,
+      "Verification Unavailable",
+      "Something went wrong while starting Discord verification. Please try again.",
+      500
+    );
+  }
+});
+
+app.get("/oauth/discord/callback", async (req, res) => {
+  const { code, state, error, error_description: errorDescription } = req.query || {};
+  if (error) {
+    return sendOAuthHtml(
+      res,
+      "Verification Cancelled",
+      String(errorDescription || error || "Discord authorization was cancelled."),
+      400
+    );
+  }
+
+  if (typeof code !== "string" || typeof state !== "string") {
+    return sendOAuthHtml(res, "Verification Failed", "Missing Discord OAuth callback data.", 400);
+  }
+
+  const session = await verificationDb.consumeDiscordOAuthSession(state);
+  if (!session) {
+    return sendOAuthHtml(res, "Verification Expired", "That Discord verification link expired. Please start again.", 400);
+  }
+
+  try {
+    const tokenPayload = await exchangeDiscordOAuthCode(code);
+    const userInfo = await fetchDiscordUserInfo(tokenPayload.access_token);
+    const discordIdentity = getDiscordIdentity(userInfo);
+    if (!discordIdentity) {
+      return sendOAuthHtml(res, "Verification Failed", "Discord did not return a usable user id.", 400);
+    }
+
+    const member = await fetchThornvaleMember(discordIdentity.id);
+    const linkedIdentity = member
+      ? discordIdentity
+      : getPublicReviewDiscordIdentity(discordIdentity);
+
+    return res.redirect(await createRobloxAuthorizationUrlForDiscord(linkedIdentity));
+  } catch (err) {
+    console.error("Discord OAuth verification error:", err);
+    return sendOAuthHtml(res, "Verification Failed", "Something went wrong while verifying your Discord account. Please try again.", 500);
+  }
 });
 
 app.get("/oauth/roblox/start/continue", async (req, res) => {

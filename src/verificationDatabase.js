@@ -58,12 +58,18 @@ function createMemoryStore() {
   const linksByDiscord = new Map();
   const linksByRoblox = new Map();
   const sessions = new Map();
+  const discordSessions = new Map();
 
   function pruneSessions() {
     const now = Date.now();
     for (const [state, session] of sessions) {
       if (session.expiresAtMs <= now) {
         sessions.delete(state);
+      }
+    }
+    for (const [state, session] of discordSessions) {
+      if (session.expiresAtMs <= now) {
+        discordSessions.delete(state);
       }
     }
   }
@@ -82,6 +88,15 @@ function createMemoryStore() {
         expiresAtMs: createdAt + SESSION_TTL_MS,
       });
     },
+    async createDiscordOAuthSession(session) {
+      pruneSessions();
+      const createdAt = Date.now();
+      discordSessions.set(session.state, {
+        ...session,
+        createdAtMs: createdAt,
+        expiresAtMs: createdAt + SESSION_TTL_MS,
+      });
+    },
     async consumeOAuthSession(state) {
       pruneSessions();
       const session = sessions.get(state);
@@ -95,6 +110,19 @@ function createMemoryStore() {
         discordTag: session.discordTag,
         nonce: session.nonce,
         codeVerifier: session.codeVerifier,
+        createdAt: toIso(session.createdAtMs),
+        expiresAt: toIso(session.expiresAtMs),
+      };
+    },
+    async consumeDiscordOAuthSession(state) {
+      pruneSessions();
+      const session = discordSessions.get(state);
+      if (!session) {
+        return null;
+      }
+      discordSessions.delete(state);
+      return {
+        state: session.state,
         createdAt: toIso(session.createdAtMs),
         expiresAt: toIso(session.expiresAtMs),
       };
@@ -232,6 +260,14 @@ function createPostgresStore() {
           expires_at TIMESTAMPTZ NOT NULL
         )
       `);
+
+      await query(`
+        CREATE TABLE IF NOT EXISTS discord_oauth_sessions (
+          state TEXT PRIMARY KEY,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          expires_at TIMESTAMPTZ NOT NULL
+        )
+      `);
     },
     async createOAuthSession(session) {
       await query("DELETE FROM roblox_oauth_sessions WHERE expires_at <= NOW()");
@@ -257,6 +293,22 @@ function createPostgresStore() {
         ]
       );
     },
+    async createDiscordOAuthSession(session) {
+      await query("DELETE FROM discord_oauth_sessions WHERE expires_at <= NOW()");
+      await query(
+        `
+          INSERT INTO discord_oauth_sessions (
+            state,
+            expires_at
+          )
+          VALUES ($1, NOW() + ($2 * INTERVAL '1 millisecond'))
+        `,
+        [
+          session.state,
+          SESSION_TTL_MS,
+        ]
+      );
+    },
     async consumeOAuthSession(state) {
       const result = await query(
         `
@@ -267,6 +319,25 @@ function createPostgresStore() {
         [state]
       );
       return normalizeSession(result.rows[0]);
+    },
+    async consumeDiscordOAuthSession(state) {
+      const result = await query(
+        `
+          DELETE FROM discord_oauth_sessions
+          WHERE state = $1 AND expires_at > NOW()
+          RETURNING *
+        `,
+        [state]
+      );
+      const row = result.rows[0];
+      if (!row) {
+        return null;
+      }
+      return {
+        state: row.state,
+        createdAt: toIso(row.created_at),
+        expiresAt: toIso(row.expires_at),
+      };
     },
     async getVerificationByDiscordId(discordId) {
       const result = await query(
