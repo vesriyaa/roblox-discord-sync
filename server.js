@@ -330,7 +330,7 @@ async function createDiscordAuthorizationUrl() {
 function buildVerificationPanelPayload() {
   const embed = new EmbedBuilder()
     .setTitle("Verification System")
-    .setDescription("Welcome to Thornvale! Click the button below to verify your account and unlock all channels.")
+    .setDescription("Welcome to Thornvale. Open the verification app to connect Discord first, then Roblox, and unlock verified access.")
     .setColor(0x2fb8df)
     .setFooter({ text: "Verification System" })
     .setTimestamp(new Date());
@@ -338,7 +338,7 @@ function buildVerificationPanelPayload() {
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId("verification|begin")
-      .setLabel("Get Verified Role")
+      .setLabel("Open Verification App")
       .setStyle(ButtonStyle.Primary)
   );
 
@@ -350,11 +350,11 @@ function buildVerificationPanelPayload() {
 
 function buildVerificationLinkPayload(authorizationUrl) {
   return {
-    content: "Click the button below to verify through Roblox. This link is only for you and expires soon.",
+    content: "Open the Thornvale verification app to connect Discord first, then Roblox.",
     components: [
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-          .setLabel("Verify Here")
+          .setLabel("Open Verification App")
           .setStyle(ButtonStyle.Link)
           .setURL(authorizationUrl)
       ),
@@ -363,47 +363,15 @@ function buildVerificationLinkPayload(authorizationUrl) {
   };
 }
 
-async function createRobloxVerificationLink(interaction, member) {
-  if (!isRobloxOAuthConfigured()) {
-    return {
-      ok: false,
-      message: "Roblox OAuth is not configured yet. Set ROBLOX_OAUTH_CLIENT_ID, ROBLOX_OAUTH_CLIENT_SECRET, and ROBLOX_OAUTH_REDIRECT_URI.",
-    };
+function getPublicAppUrl(path = "/oauth/roblox/start") {
+  const callbackUrl = DISCORD_OAUTH_REDIRECT_URI || ROBLOX_OAUTH_REDIRECT_URI || "";
+  const fallbackBase = callbackUrl.replace(/\/oauth\/(?:discord|roblox)\/callback$/i, "");
+  const baseUrl = (PUBLIC_BASE_URL || fallbackBase || "").replace(/\/$/, "");
+  if (!baseUrl) {
+    return "";
   }
 
-  if (member.roles.cache.has(VERIFIED_ROLE_ID)) {
-    return {
-      ok: false,
-      alreadyVerified: true,
-      message: "You are already verified.",
-    };
-  }
-
-  const existing = await verificationDb.getVerificationByDiscordId(interaction.user.id);
-  if (existing) {
-    if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
-      await member.roles.add(VERIFIED_ROLE_ID);
-    }
-    return {
-      ok: false,
-      alreadyVerified: true,
-      message: "You are already verified.",
-    };
-  }
-
-  const session = {
-    state: createRandomToken(32),
-    nonce: createRandomToken(24),
-    codeVerifier: createRandomToken(64),
-    discordId: interaction.user.id,
-    discordTag: interaction.user.tag,
-  };
-  await verificationDb.createOAuthSession(session);
-
-  return {
-    ok: true,
-    authorizationUrl: buildRobloxAuthorizeUrl(session),
-  };
+  return `${baseUrl}${path}`;
 }
 
 function isRobloxReviewSession(session) {
@@ -437,16 +405,26 @@ async function createRobloxAuthorizationUrlForDiscord(discordIdentity) {
   return buildRobloxAuthorizeUrl(session);
 }
 
-async function sendRobloxVerificationLink(interaction, member) {
-  const result = await createRobloxVerificationLink(interaction, member);
-  if (!result.ok) {
+async function sendVerificationAppLink(interaction, member) {
+  const verificationUrl = getPublicAppUrl();
+  if (!verificationUrl) {
     return interaction.reply({
-      content: result.message,
+      content: "Verification app URL is not configured yet. Set PUBLIC_BASE_URL in Railway.",
       ephemeral: true,
     });
   }
 
-  return interaction.reply(buildVerificationLinkPayload(result.authorizationUrl));
+  const existing = await verificationDb.getVerificationByDiscordId(interaction.user.id);
+  if (existing && member && !member.roles.cache.has(VERIFIED_ROLE_ID)) {
+    await member.roles.add(VERIFIED_ROLE_ID);
+  }
+
+  const payload = buildVerificationLinkPayload(verificationUrl);
+  if (existing || member?.roles.cache.has(VERIFIED_ROLE_ID)) {
+    payload.content = "You are already verified. Open the Thornvale verification app to view your linked accounts.";
+  }
+
+  return interaction.reply(payload);
 }
 
 async function exchangeRobloxOAuthCode(code, session) {
@@ -560,6 +538,9 @@ function getDiscordIdentity(userInfo) {
     username,
     displayName: globalName || username,
     tag: `${username}${discriminator}` || id,
+    avatarUrl: userInfo.avatar
+      ? `https://cdn.discordapp.com/avatars/${id}/${userInfo.avatar}.${String(userInfo.avatar).startsWith("a_") ? "gif" : "png"}?size=128`
+      : "",
   };
 }
 
@@ -2260,7 +2241,7 @@ client.on("interactionCreate", async (interaction) => {
   if (interaction.isButton()) {
     if (interaction.customId === "verification|begin") {
       const { member } = await getInteractionMember(interaction);
-      return sendRobloxVerificationLink(interaction, member);
+      return sendVerificationAppLink(interaction, member);
     }
   }
 
@@ -2306,7 +2287,7 @@ client.on("interactionCreate", async (interaction) => {
   // VERIFY
   // ===============================
   if (interaction.commandName === "verify") {
-    return sendRobloxVerificationLink(interaction, member);
+    return sendVerificationAppLink(interaction, member);
   }
 
   if (interaction.commandName === "verification-system") {
@@ -2748,7 +2729,7 @@ app.get("/oauth/roblox/callback", async (req, res) => {
     const guild = await client.guilds.fetch(GUILD_ID);
     const member = await guild.members.fetch(session.discordId);
 
-    await verificationDb.upsertVerification({
+    const linkedRecord = await verificationDb.upsertVerification({
       discordId: session.discordId,
       robloxUserId: identity.robloxUserId,
       robloxUsername: identity.robloxUsername,
@@ -2763,10 +2744,17 @@ app.get("/oauth/roblox/callback", async (req, res) => {
       await member.roles.remove(UNWAVED_ROLE_ID);
     }
 
-    return sendOAuthHtml(
+    return renderLinkedAccountPage(
       res,
-      "Verification Complete",
-      "Your Roblox account is now linked and your Discord verified role has been applied. You can return to Discord."
+      {
+        discordIdentity: {
+          id: session.discordId,
+          tag: session.discordTag,
+          displayName: session.discordTag,
+        },
+        record: linkedRecord,
+        message: "Your Roblox account is now linked and your Discord verified role has been applied.",
+      }
     );
   } catch (err) {
     console.error("Roblox OAuth verification error:", err);
@@ -3877,7 +3865,8 @@ function renderBasePage(res, title, body, options = {}) {
 
     .verify-frame,
     .doc-frame,
-    .result-panel {
+    .result-panel,
+    .linked-panel {
       width: min(860px, 100%);
       border: 0;
       border-radius: 0;
@@ -3887,7 +3876,8 @@ function renderBasePage(res, title, body, options = {}) {
     }
 
     .verify-frame,
-    .result-panel {
+    .result-panel,
+    .linked-panel {
       padding: 0;
     }
 
@@ -3972,6 +3962,78 @@ function renderBasePage(res, title, body, options = {}) {
       margin: 0 0 26px;
       color: rgba(255, 255, 255, 0.66);
       font-size: 16px;
+    }
+
+    .linked-summary {
+      width: min(720px, 100%);
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin: 34px 0 26px;
+      padding: 0 0 22px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.16);
+    }
+
+    .linked-account {
+      display: grid;
+      grid-template-columns: 58px 1fr;
+      align-items: center;
+      gap: 16px;
+      min-width: 0;
+    }
+
+    .linked-avatar {
+      width: 58px;
+      height: 58px;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.32);
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.06);
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 18px;
+      font-style: italic;
+    }
+
+    .linked-avatar img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .linked-label {
+      display: block;
+      color: rgba(255, 255, 255, 0.42);
+      font-size: 13px;
+    }
+
+    .linked-name {
+      display: block;
+      overflow-wrap: anywhere;
+      color: rgba(255, 255, 255, 0.9);
+      font-size: 19px;
+    }
+
+    .linked-details {
+      width: min(720px, 100%);
+      margin: 0 0 30px;
+      border-top: 1px solid rgba(255, 255, 255, 0.14);
+    }
+
+    .linked-row {
+      display: grid;
+      grid-template-columns: 180px 1fr;
+      gap: 18px;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+      color: rgba(255, 255, 255, 0.66);
+      font-size: 15px;
+    }
+
+    .linked-row strong {
+      color: rgba(255, 255, 255, 0.78);
+      font-weight: 400;
     }
 
     .verify-button,
@@ -4117,6 +4179,15 @@ function renderBasePage(res, title, body, options = {}) {
         grid-template-columns: 38px 1fr;
       }
 
+      .linked-summary {
+        grid-template-columns: 1fr;
+      }
+
+      .linked-row {
+        grid-template-columns: 1fr;
+        gap: 2px;
+      }
+
       .site-footer {
         padding: 18px 22px;
       }
@@ -4248,6 +4319,81 @@ function renderResultPage(res, page) {
   });
 }
 
+function formatLinkedDate(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) {
+    return "Unknown";
+  }
+
+  return date.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function getRobloxAvatarUrl(record) {
+  const robloxUserId = record?.robloxUserId ? encodeURIComponent(record.robloxUserId) : "";
+  return robloxUserId
+    ? `https://www.roblox.com/headshot-thumbnail/image?userId=${robloxUserId}&width=150&height=150&format=png`
+    : "";
+}
+
+function renderAvatar(label, url, fallback) {
+  const safeLabel = escapeHtml(label);
+  if (url) {
+    return `<span class="linked-avatar"><img src="${escapeHtml(url)}" alt="${safeLabel} avatar"></span>`;
+  }
+
+  return `<span class="linked-avatar" aria-hidden="true">${escapeHtml(fallback)}</span>`;
+}
+
+function renderLinkedAccountPage(res, page) {
+  const record = page.record || {};
+  const discordIdentity = page.discordIdentity || {};
+  const discordName = discordIdentity.displayName || discordIdentity.tag || record.discordId || "Discord";
+  const robloxName = record.robloxDisplayName || record.robloxUsername || record.robloxUserId || "Roblox";
+  const robloxUsername = record.robloxUsername || robloxName;
+  const message = page.message || "Your Thornvale accounts are already linked.";
+  const body = `
+    <main class="result-main">
+      <section class="linked-panel" aria-labelledby="linked-title">
+        <p class="eyebrow">Verification Complete</p>
+        <h1 id="linked-title">Welcome Back</h1>
+        <p class="subtitle">fully linked</p>
+        <div class="linked-summary" aria-label="Linked accounts">
+          <div class="linked-account">
+            ${renderAvatar(discordName, discordIdentity.avatarUrl, "D")}
+            <span>
+              <span class="linked-label">Discord</span>
+              <span class="linked-name">${escapeHtml(discordName)}</span>
+            </span>
+          </div>
+          <div class="linked-account">
+            ${renderAvatar(robloxName, getRobloxAvatarUrl(record), "R")}
+            <span>
+              <span class="linked-label">Roblox</span>
+              <span class="linked-name">${escapeHtml(robloxName)}</span>
+            </span>
+          </div>
+        </div>
+        <p class="result-message">${escapeHtml(message)}</p>
+        <div class="linked-details">
+          <div class="linked-row"><strong>Discord ID</strong><span>${escapeHtml(record.discordId || discordIdentity.id || "")}</span></div>
+          <div class="linked-row"><strong>Roblox ID</strong><span>${escapeHtml(record.robloxUserId || "")}</span></div>
+          <div class="linked-row"><strong>Roblox Username</strong><span>${escapeHtml(robloxUsername)}</span></div>
+          <div class="linked-row"><strong>Linked</strong><span>${escapeHtml(formatLinkedDate(record.verifiedAt))}</span></div>
+        </div>
+        <a class="result-action" href="/oauth/roblox/start">Return</a>
+      </section>
+    </main>`;
+
+  renderBasePage(res, "Welcome Back", body, {
+    statusCode: page.statusCode || 200,
+    statusLabel: "Verified",
+  });
+}
+
 function renderLegalSections(sections) {
   return sections
     .map((section, index) => `
@@ -4349,6 +4495,22 @@ app.get("/oauth/discord/callback", async (req, res) => {
     }
 
     const member = await fetchThornvaleMember(discordIdentity.id);
+    const existingLink = await verificationDb.getVerificationByDiscordId(discordIdentity.id);
+    if (existingLink) {
+      if (member && !member.roles.cache.has(VERIFIED_ROLE_ID)) {
+        await member.roles.add(VERIFIED_ROLE_ID);
+      }
+      if (member && UNWAVED_ROLE_ID && member.roles.cache.has(UNWAVED_ROLE_ID)) {
+        await member.roles.remove(UNWAVED_ROLE_ID);
+      }
+
+      return renderLinkedAccountPage(res, {
+        discordIdentity,
+        record: existingLink,
+        message: "Your Discord and Roblox accounts are already linked for Thornvale.",
+      });
+    }
+
     const linkedIdentity = member
       ? discordIdentity
       : getPublicReviewDiscordIdentity(discordIdentity);
