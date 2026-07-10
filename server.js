@@ -22,7 +22,7 @@ const {
   API_KEY,
   BOT_TOKEN,
   BOT_TRANSCRIPTS_CHANNEL_ID,
-  COMMAND_LOG_CHANNEL_ID,
+  COMMAND_BAR_LOG_CHANNEL_ID,
   DEATH_CHANNEL_ID,
   DISCORD_OAUTH_CLIENT_ID,
   DISCORD_OAUTH_CLIENT_SECRET,
@@ -125,7 +125,7 @@ const EAGER_DEFERRED_COMMANDS = new Set([
 const MEMBER_COMMAND_ROLE_ID = process.env.MEMBER_COMMAND_ROLE_ID || "1415902349192331383";
 const MEMBER_ALLOWED_COMMANDS = new Set(["verify", "getroles"]);
 const REVIEW_DISCORD_ID_PREFIX = "oauth-review:";
-let commandLogChannelPromise = null;
+let commandBarLogChannelPromise = null;
 
 function truncateText(value, limit = 1000) {
   const text = String(value ?? "");
@@ -136,113 +136,124 @@ function truncateText(value, limit = 1000) {
   return `${text.slice(0, Math.max(0, limit - 3))}...`;
 }
 
-function formatCommandOptionValue(option) {
-  if (option.user) {
-    return `${option.user.tag || option.user.username || "User"} (${option.user.id})`;
+function formatCommandBarArg(value) {
+  if (value == null) {
+    return "nil";
   }
 
-  if (option.member?.user) {
-    return `${option.member.user.tag || option.member.user.username || "Member"} (${option.member.user.id})`;
-  }
-
-  if (option.role) {
-    return `${option.role.name || "Role"} (${option.role.id})`;
-  }
-
-  if (option.channel) {
-    return `${option.channel.name ? `#${option.channel.name}` : "Channel"} (${option.channel.id})`;
-  }
-
-  if (option.attachment) {
-    return option.attachment.url || option.attachment.name || option.attachment.id || "Attachment";
-  }
-
-  return String(option.value ?? "");
-}
-
-function collectCommandOptionLines(options, prefix = []) {
-  const lines = [];
-
-  for (const option of options || []) {
-    const optionPath = [...prefix, option.name].filter(Boolean);
-    if (Array.isArray(option.options) && option.options.length > 0 && option.value == null) {
-      lines.push(...collectCommandOptionLines(option.options, optionPath));
-      continue;
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
     }
-
-    lines.push(`${optionPath.join(".")}: ${formatCommandOptionValue(option)}`);
   }
 
-  return lines;
+  return String(value);
 }
 
-function getCommandPath(interaction) {
-  const path = [interaction.commandName];
-  let options = interaction.options?.data || [];
-
-  while (options.length === 1 && Array.isArray(options[0].options) && options[0].value == null) {
-    path.push(options[0].name);
-    options = options[0].options;
+function formatCommandBarArgs(args) {
+  if (!Array.isArray(args) || args.length === 0) {
+    return "None";
   }
 
-  return `/${path.join(" ")}`;
+  return args
+    .map((value, index) => `${index + 1}. ${formatCommandBarArg(value)}`)
+    .join("\n");
 }
 
-async function getCommandLogChannel() {
-  if (!COMMAND_LOG_CHANNEL_ID) {
+function getCommandBarLogColor(status) {
+  if (status === "denied") {
+    return 0xED4245;
+  }
+
+  if (status === "failed") {
+    return 0xFEE75C;
+  }
+
+  return 0x57F287;
+}
+
+async function getCommandBarLogChannel() {
+  if (!COMMAND_BAR_LOG_CHANNEL_ID) {
     return null;
   }
 
-  if (!commandLogChannelPromise) {
-    commandLogChannelPromise = client.channels.fetch(COMMAND_LOG_CHANNEL_ID).catch((err) => {
-      commandLogChannelPromise = null;
+  if (!commandBarLogChannelPromise) {
+    commandBarLogChannelPromise = client.channels.fetch(COMMAND_BAR_LOG_CHANNEL_ID).catch((err) => {
+      commandBarLogChannelPromise = null;
       throw err;
     });
   }
 
-  const channel = await commandLogChannelPromise;
+  const channel = await commandBarLogChannelPromise;
   return channel && typeof channel.send === "function" ? channel : null;
 }
 
-async function logDiscordCommandUsage(interaction, member) {
-  const channel = await getCommandLogChannel();
+async function postCommandBarLog(payload) {
+  const channel = await getCommandBarLogChannel();
   if (!channel) {
-    return;
+    throw new Error("Command bar log channel unavailable");
   }
 
-  const commandPath = getCommandPath(interaction);
-  const optionLines = collectCommandOptionLines(interaction.options?.data || []);
-  const sourceChannel = interaction.channelId ? `<#${interaction.channelId}> (${interaction.channelId})` : "Direct Message";
-  const memberLabel = member?.displayName
-    ? `${member.displayName} / ${interaction.user.tag}`
-    : interaction.user.tag;
+  const player = payload?.player && typeof payload.player === "object" ? payload.player : {};
+  const commandName = truncateText(payload?.commandName || "unknown", 256);
+  const status = String(payload?.status || "executed").toLowerCase();
+  const placeName = truncateText(payload?.placeName || "", 256);
+  const placeId = payload?.placeId ? String(payload.placeId) : "unknown";
+  const jobId = payload?.jobId ? String(payload.jobId) : "unknown";
+  const profileUrl = player.userId ? `https://www.roblox.com/users/${player.userId}/profile` : "Unknown";
 
   const embed = new EmbedBuilder()
-    .setTitle("Discord Command Used")
-    .setColor(0x5865F2)
+    .setTitle(status === "denied" ? "Command Bar Denied" : "Command Bar Used")
+    .setColor(getCommandBarLogColor(status))
     .setTimestamp(new Date())
     .addFields(
       {
         name: "Command",
-        value: truncateText(commandPath, 256),
+        value: truncateText(commandName, 256),
         inline: true,
       },
       {
-        name: "User",
-        value: truncateText(`${memberLabel} (<@${interaction.user.id}>)\n${interaction.user.id}`, 512),
+        name: "Status",
+        value: truncateText(status, 128),
         inline: true,
       },
       {
-        name: "Channel",
-        value: truncateText(sourceChannel, 512),
+        name: "Executor",
+        value: truncateText(`${player.name || "Unknown"} (${player.userId || "unknown"})\n${profileUrl}`, 512),
         inline: false,
       },
       {
-        name: "Options",
-        value: truncateText(optionLines.length > 0 ? optionLines.join("\n") : "None", 1024),
+        name: "Staff Role",
+        value: truncateText(payload?.role || "Unknown", 256),
+        inline: true,
+      },
+      {
+        name: "Place",
+        value: truncateText(placeName ? `${placeName} (${placeId})` : placeId, 256),
+        inline: true,
+      },
+      {
+        name: "Job ID",
+        value: truncateText(jobId, 256),
+        inline: false,
+      },
+      {
+        name: "Arguments",
+        value: truncateText(formatCommandBarArgs(payload?.args), 1024),
         inline: false,
       }
     );
+
+  const message = payload?.message || payload?.reason;
+  if (message) {
+    embed.addFields({
+      name: status === "denied" ? "Reason" : "Message",
+      value: truncateText(message, 1024),
+      inline: false,
+    });
+  }
 
   await channel.send({ embeds: [embed] });
 }
@@ -2437,9 +2448,6 @@ client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   const { guild, member } = await getInteractionMember(interaction);
-  logDiscordCommandUsage(interaction, member).catch((err) => {
-    console.error("Command usage log error:", err);
-  });
 
   if (EAGER_DEFERRED_COMMANDS.has(interaction.commandName)) {
     await ensureEphemeralDefer(interaction);
@@ -3188,6 +3196,36 @@ app.post("/relayWebhook/:service", async (req, res) => {
     res.status(500).json({
       ok: false,
       error: "Error posting relay webhook",
+    });
+  }
+});
+
+app.post("/commandBar/log", async (req, res) => {
+
+  if (req.headers["x-api-key"] !== API_KEY) {
+    return res.status(403).send("Unauthorized");
+  }
+
+  if (!client.isReady()) {
+    return res.status(503).send("Bot not ready");
+  }
+
+  if (!req.body || typeof req.body !== "object") {
+    return res.status(400).send("Missing command log payload");
+  }
+
+  try {
+    await postCommandBarLog(req.body);
+    res.json({
+      ok: true,
+      channelId: COMMAND_BAR_LOG_CHANNEL_ID,
+    });
+
+  } catch (err) {
+    console.error("Command bar log error:", err);
+    res.status(500).json({
+      ok: false,
+      error: "Error posting command bar log",
     });
   }
 });
