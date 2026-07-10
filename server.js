@@ -191,6 +191,13 @@ async function getCommandBarLogChannel() {
 }
 
 async function postCommandBarLog(payload) {
+  if (payload?.staffCommand !== true) {
+    return {
+      skipped: true,
+      reason: "not_staff_command",
+    };
+  }
+
   const channel = await getCommandBarLogChannel();
   if (!channel) {
     throw new Error("Command bar log channel unavailable");
@@ -256,6 +263,9 @@ async function postCommandBarLog(payload) {
   }
 
   await channel.send({ embeds: [embed] });
+  return {
+    skipped: false,
+  };
 }
 // 🔹 ROLE IDS
 // 🔹 DISCORD ROLE SWAP
@@ -3215,10 +3225,12 @@ app.post("/commandBar/log", async (req, res) => {
   }
 
   try {
-    await postCommandBarLog(req.body);
+    const result = await postCommandBarLog(req.body);
     res.json({
       ok: true,
       channelId: COMMAND_BAR_LOG_CHANNEL_ID,
+      skipped: result?.skipped === true,
+      reason: result?.reason || null,
     });
 
   } catch (err) {
