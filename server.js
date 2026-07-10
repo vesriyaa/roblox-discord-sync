@@ -22,6 +22,7 @@ const {
   API_KEY,
   BOT_TOKEN,
   BOT_TRANSCRIPTS_CHANNEL_ID,
+  COMMAND_LOG_CHANNEL_ID,
   DEATH_CHANNEL_ID,
   DISCORD_OAUTH_CLIENT_ID,
   DISCORD_OAUTH_CLIENT_SECRET,
@@ -124,6 +125,127 @@ const EAGER_DEFERRED_COMMANDS = new Set([
 const MEMBER_COMMAND_ROLE_ID = process.env.MEMBER_COMMAND_ROLE_ID || "1415902349192331383";
 const MEMBER_ALLOWED_COMMANDS = new Set(["verify", "getroles"]);
 const REVIEW_DISCORD_ID_PREFIX = "oauth-review:";
+let commandLogChannelPromise = null;
+
+function truncateText(value, limit = 1000) {
+  const text = String(value ?? "");
+  if (text.length <= limit) {
+    return text;
+  }
+
+  return `${text.slice(0, Math.max(0, limit - 3))}...`;
+}
+
+function formatCommandOptionValue(option) {
+  if (option.user) {
+    return `${option.user.tag || option.user.username || "User"} (${option.user.id})`;
+  }
+
+  if (option.member?.user) {
+    return `${option.member.user.tag || option.member.user.username || "Member"} (${option.member.user.id})`;
+  }
+
+  if (option.role) {
+    return `${option.role.name || "Role"} (${option.role.id})`;
+  }
+
+  if (option.channel) {
+    return `${option.channel.name ? `#${option.channel.name}` : "Channel"} (${option.channel.id})`;
+  }
+
+  if (option.attachment) {
+    return option.attachment.url || option.attachment.name || option.attachment.id || "Attachment";
+  }
+
+  return String(option.value ?? "");
+}
+
+function collectCommandOptionLines(options, prefix = []) {
+  const lines = [];
+
+  for (const option of options || []) {
+    const optionPath = [...prefix, option.name].filter(Boolean);
+    if (Array.isArray(option.options) && option.options.length > 0 && option.value == null) {
+      lines.push(...collectCommandOptionLines(option.options, optionPath));
+      continue;
+    }
+
+    lines.push(`${optionPath.join(".")}: ${formatCommandOptionValue(option)}`);
+  }
+
+  return lines;
+}
+
+function getCommandPath(interaction) {
+  const path = [interaction.commandName];
+  let options = interaction.options?.data || [];
+
+  while (options.length === 1 && Array.isArray(options[0].options) && options[0].value == null) {
+    path.push(options[0].name);
+    options = options[0].options;
+  }
+
+  return `/${path.join(" ")}`;
+}
+
+async function getCommandLogChannel() {
+  if (!COMMAND_LOG_CHANNEL_ID) {
+    return null;
+  }
+
+  if (!commandLogChannelPromise) {
+    commandLogChannelPromise = client.channels.fetch(COMMAND_LOG_CHANNEL_ID).catch((err) => {
+      commandLogChannelPromise = null;
+      throw err;
+    });
+  }
+
+  const channel = await commandLogChannelPromise;
+  return channel && typeof channel.send === "function" ? channel : null;
+}
+
+async function logDiscordCommandUsage(interaction, member) {
+  const channel = await getCommandLogChannel();
+  if (!channel) {
+    return;
+  }
+
+  const commandPath = getCommandPath(interaction);
+  const optionLines = collectCommandOptionLines(interaction.options?.data || []);
+  const sourceChannel = interaction.channelId ? `<#${interaction.channelId}> (${interaction.channelId})` : "Direct Message";
+  const memberLabel = member?.displayName
+    ? `${member.displayName} / ${interaction.user.tag}`
+    : interaction.user.tag;
+
+  const embed = new EmbedBuilder()
+    .setTitle("Discord Command Used")
+    .setColor(0x5865F2)
+    .setTimestamp(new Date())
+    .addFields(
+      {
+        name: "Command",
+        value: truncateText(commandPath, 256),
+        inline: true,
+      },
+      {
+        name: "User",
+        value: truncateText(`${memberLabel} (<@${interaction.user.id}>)\n${interaction.user.id}`, 512),
+        inline: true,
+      },
+      {
+        name: "Channel",
+        value: truncateText(sourceChannel, 512),
+        inline: false,
+      },
+      {
+        name: "Options",
+        value: truncateText(optionLines.length > 0 ? optionLines.join("\n") : "None", 1024),
+        inline: false,
+      }
+    );
+
+  await channel.send({ embeds: [embed] });
+}
 // 🔹 ROLE IDS
 // 🔹 DISCORD ROLE SWAP
 // 🔹 Team → Role mapping
@@ -2315,6 +2437,10 @@ client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   const { guild, member } = await getInteractionMember(interaction);
+  logDiscordCommandUsage(interaction, member).catch((err) => {
+    console.error("Command usage log error:", err);
+  });
+
   if (EAGER_DEFERRED_COMMANDS.has(interaction.commandName)) {
     await ensureEphemeralDefer(interaction);
   }
