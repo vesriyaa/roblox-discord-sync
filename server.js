@@ -111,6 +111,7 @@ const spreadsheetPermissionService = createSpreadsheetPermissionService({
 });
 const EAGER_DEFERRED_COMMANDS = new Set([
   "unlink",
+  "dm",
   "groupaccept",
   "inactive-check",
   "wipe",
@@ -806,7 +807,10 @@ function normalizeEventResources(resources, existingResources = {}) {
 
   return {
     gasUsed: normalizeValue(resources?.gasUsed, existingResources.gasUsed),
-    bladesUsed: normalizeValue(resources?.bladesUsed, existingResources.bladesUsed),
+    aetherBulletsUsed: normalizeValue(
+      resources?.aetherBulletsUsed ?? resources?.bladesUsed,
+      existingResources.aetherBulletsUsed ?? existingResources.bladesUsed
+    ),
     bandagesUsed: normalizeValue(resources?.bandagesUsed, existingResources.bandagesUsed),
   };
 }
@@ -1079,7 +1083,7 @@ function buildEventSummaryMessage(session) {
     ...buildEventInjuriesSection(session.participants),
     "",
     `*Gas Used: ${session.resources.gasUsed}*`,
-    `*Blades Used: ${session.resources.bladesUsed}*`,
+    `*Aether Bullets Used: ${session.resources.aetherBulletsUsed}*`,
     `*Bandages Used: ${session.resources.bandagesUsed}*`,
   ].join("\n");
 }
@@ -2587,6 +2591,31 @@ client.on("interactionCreate", async (interaction) => {
       console.error("Unlink error:", err);
       return sendInteractionResponse(interaction, "❌ Failed to unlink user.");
     }
+  }
+
+  // ===============================
+  // DIRECT MESSAGE
+  // ===============================
+  if (interaction.commandName === "dm") {
+    if (!await ensureAdminPermission(interaction, member, "dm")) {
+      return;
+    }
+
+    const targetUser = interaction.options.getUser("user", true);
+    const message = String(interaction.options.getString("message", true) || "").trim();
+    if (!message) {
+      return sendInteractionResponse(interaction, "A message is required.");
+    }
+
+    const delivered = await safeSendDm(targetUser, message);
+    if (!delivered) {
+      return sendInteractionResponse(
+        interaction,
+        `Could not DM ${targetUser.tag}. They may have direct messages disabled.`
+      );
+    }
+
+    return sendInteractionResponse(interaction, `Message sent to ${targetUser.tag}.`);
   }
 
   // ===============================

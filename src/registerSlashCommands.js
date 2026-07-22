@@ -25,6 +25,21 @@ function buildSlashCommands() {
       ),
 
     new SlashCommandBuilder()
+      .setName("dm")
+      .setDescription("Send a direct message from the Thornvale bot")
+      .addUserOption((option) =>
+        option.setName("user")
+          .setDescription("Discord user to message")
+          .setRequired(true)
+      )
+      .addStringOption((option) =>
+        option.setName("message")
+          .setDescription("Message to send")
+          .setMaxLength(1900)
+          .setRequired(true)
+      ),
+
+    new SlashCommandBuilder()
       .setName("getroles")
       .setDescription("Restore your team roles from Roblox"),
 
