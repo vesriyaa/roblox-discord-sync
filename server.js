@@ -311,6 +311,13 @@ async function updateGroupAcceptRoles(member) {
   }
 }
 
+async function ensureVerifiedRole(member) {
+  if (member && !member.roles.cache.has(VERIFIED_ROLE_ID)) {
+    // Verification is additive: roles assigned by Dyno or other systems must survive.
+    await member.roles.add(VERIFIED_ROLE_ID);
+  }
+}
+
 async function safeSendDm(user, content) {
   if (!user || typeof user.send !== "function") {
     return false;
@@ -559,8 +566,8 @@ async function sendVerificationAppLink(interaction, member) {
   }
 
   const existing = await verificationDb.getVerificationByDiscordId(interaction.user.id);
-  if (existing && member && !member.roles.cache.has(VERIFIED_ROLE_ID)) {
-    await member.roles.add(VERIFIED_ROLE_ID);
+  if (existing) {
+    await ensureVerifiedRole(member);
   }
 
   const payload = buildVerificationLinkPayload(verificationUrl);
@@ -2950,12 +2957,7 @@ app.get("/oauth/roblox/callback", async (req, res) => {
     });
     unlinkedUsers.delete(session.discordId);
 
-    if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
-      await member.roles.add(VERIFIED_ROLE_ID);
-    }
-    if (UNWAVED_ROLE_ID && member.roles.cache.has(UNWAVED_ROLE_ID)) {
-      await member.roles.remove(UNWAVED_ROLE_ID);
-    }
+    await ensureVerifiedRole(member);
 
     return renderLinkedAccountPage(
       res,
@@ -3002,12 +3004,7 @@ app.post("/verify", async (req, res) => {
     const guild = await client.guilds.fetch(GUILD_ID);
     const member = await guild.members.fetch(discordId);
 
-    if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
-      await member.roles.add(VERIFIED_ROLE_ID);
-    }
-    if (UNWAVED_ROLE_ID && member.roles.cache.has(UNWAVED_ROLE_ID)) {
-      await member.roles.remove(UNWAVED_ROLE_ID);
-    }
+    await ensureVerifiedRole(member);
 
     if (robloxUserId) {
       await verificationDb.upsertVerification({
@@ -3122,12 +3119,7 @@ app.post("/activity/game", async (req, res) => {
       try {
         const guild = await client.guilds.fetch(GUILD_ID);
         const member = await guild.members.fetch(record.discordId);
-        if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
-          await member.roles.add(VERIFIED_ROLE_ID);
-        }
-        if (UNWAVED_ROLE_ID && member.roles.cache.has(UNWAVED_ROLE_ID)) {
-          await member.roles.remove(UNWAVED_ROLE_ID);
-        }
+        await ensureVerifiedRole(member);
       } catch (roleErr) {
         console.error("Game activity role refresh error:", roleErr);
       }
@@ -4777,12 +4769,7 @@ app.get("/oauth/discord/callback", async (req, res) => {
     const member = await fetchThornvaleMember(discordIdentity.id);
     const existingLink = await verificationDb.getVerificationByDiscordId(discordIdentity.id);
     if (existingLink) {
-      if (member && !member.roles.cache.has(VERIFIED_ROLE_ID)) {
-        await member.roles.add(VERIFIED_ROLE_ID);
-      }
-      if (member && UNWAVED_ROLE_ID && member.roles.cache.has(UNWAVED_ROLE_ID)) {
-        await member.roles.remove(UNWAVED_ROLE_ID);
-      }
+      await ensureVerifiedRole(member);
 
       return renderLinkedAccountPage(res, {
         discordIdentity,
