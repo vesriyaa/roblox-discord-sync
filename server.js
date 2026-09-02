@@ -4,6 +4,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   Client,
   EmbedBuilder,
   GatewayIntentBits,
@@ -92,6 +93,7 @@ const { createWebhookService } = require("./src/webhookService");
 const { createRobloxGroupService } = require("./src/robloxGroupService");
 const { createBulkAccessService } = require("./src/bulkAccessService");
 const { createGroupAccessService } = require("./src/groupAccessService");
+const { createPrivateNoticeService } = require("./src/privateNoticeService");
 const { createWaveStore } = require("./src/waveStore");
 const { createWaveService } = require("./src/waveService");
 
@@ -110,6 +112,7 @@ const client = new Client({
 });
 
 const verificationService = createVerificationService({ verificationDb });
+const privateNoticeService = createPrivateNoticeService({ client });
 const robloxGroupService = createRobloxGroupService({
   groupId: GROUP_ID,
   cookie: process.env.ROBLOX_COOKIE,
@@ -139,6 +142,7 @@ const waveService = createWaveService({
   client,
   store: waveStore,
   verificationService,
+  verifiedRoleId: VERIFIED_ROLE_ID,
   robloxGroupUrl: robloxGroupService.getGroupUrl(),
   async canReviewInteraction(interaction) {
     const { member } = await getInteractionMember(interaction);
@@ -445,19 +449,22 @@ async function applyInactiveDiscordRoles(member) {
     return { removed: 0, unwaved: false };
   }
 
-  const removableRoleIds = getInactiveRoleRemovalIds()
+  const presentRemovalIds = getInactiveRoleRemovalIds()
     .filter((roleId) => roleId !== UNWAVED_ROLE_ID && member.roles.cache.has(roleId));
 
-  if (removableRoleIds.length > 0) {
-    await member.roles.remove(removableRoleIds);
-  }
-
-  if (UNWAVED_ROLE_ID && !member.roles.cache.has(UNWAVED_ROLE_ID)) {
-    await member.roles.add(UNWAVED_ROLE_ID);
+  if (typeof member.roles.set === "function") {
+    await member.roles.set(UNWAVED_ROLE_ID ? [UNWAVED_ROLE_ID] : []);
+  } else {
+    if (presentRemovalIds.length > 0) {
+      await member.roles.remove(presentRemovalIds);
+    }
+    if (UNWAVED_ROLE_ID && !member.roles.cache.has(UNWAVED_ROLE_ID)) {
+      await member.roles.add(UNWAVED_ROLE_ID);
+    }
   }
 
   return {
-    removed: removableRoleIds.length,
+    removed: presentRemovalIds.length,
     unwaved: Boolean(UNWAVED_ROLE_ID),
   };
 }
@@ -657,8 +664,10 @@ async function sendVerificationAppLink(interaction, member) {
   }
 
   const payload = buildVerificationLinkPayload(verificationUrl);
-  if (existing || member?.roles.cache.has(VERIFIED_ROLE_ID)) {
+  if (existing) {
     payload.content = "You are already verified. Open the Thornvale verification app to view your linked accounts.";
+  } else if (member?.roles.cache.has(VERIFIED_ROLE_ID)) {
+    payload.content = "Your Verified role is still present, but its saved Roblox account link is missing. Open the Thornvale verification app once to repair the link.";
   }
 
   return interaction.reply(payload);
@@ -2379,6 +2388,8 @@ async function handleInactiveCheckCommand(interaction, guild) {
     return sendInteractionResponse(interaction, "Unknown inactive-check action.");
   }
 
+  const notificationChannel = interaction.options.getChannel("notificationchannel", true);
+
   const records = await verificationDb.listInactiveCandidates(inactiveCutoffIso, limit);
   if (records.length === 0) {
     return sendInteractionResponse(interaction, `No verified users are past the ${days}-day inactivity cutoff.`);
@@ -2399,10 +2410,11 @@ async function handleInactiveCheckCommand(interaction, guild) {
       const queued = await queueInactiveWipe(interaction, record, days);
       if (targetMember) {
         await applyInactiveDiscordRoles(targetMember);
-        await safeSendDm(
-          targetMember.user,
-          `You have been marked as Unwaved in Thornvale because no in-game activity was recorded for ${getDaysSinceIso(record.lastGameSeenAt) ?? days}+ days. Your verification was removed and your character data has been queued for wipe.`
-        );
+        await privateNoticeService.sendAccessNotice({
+          channel: notificationChannel,
+          member: targetMember,
+          kind: "inactive",
+        });
       }
 
       unlinkedUsers.add(record.discordId);
@@ -2636,11 +2648,16 @@ client.on("interactionCreate", async (interaction) => {
         discordId: interaction.user.id,
         member,
       });
+      const completionMessage = result.alreadyMember
+        ? "Your Roblox group membership was already active, your Thornvale access roles are updated, and this application is now complete."
+        : "Your Roblox group request was accepted, your Thornvale access roles are updated, and this application is now complete.";
+      await privateNoticeService.closeApplicationThread({
+        application: result.application,
+        content: completionMessage,
+      });
       return sendInteractionResponse(
         interaction,
-        result.alreadyMember
-          ? "Your Roblox group membership is already active and your Thornvale access roles are updated."
-          : "Your Roblox group request was accepted and your Thornvale access roles are now updated."
+        completionMessage
       );
     } catch (err) {
       console.error(`verifygroup failed for ${interaction.user.id}:`, err);
@@ -2689,16 +2706,35 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     try {
+      const notificationChannel = interaction.options.getChannel("notificationchannel", true);
+      const notifyKind = commandName === "unwave-all" ? "unwaved" : "unverified";
       const result = commandName === "unwave-all"
         ? await bulkAccessService.unwaveEveryone(guild, {
           exemptRoleIds: parseDiscordIdList(interaction.options.getString("exemptroles")),
+          onMemberUpdated(targetMember) {
+            return privateNoticeService.sendAccessNotice({
+              channel: notificationChannel,
+              member: targetMember,
+              kind: notifyKind,
+            });
+          },
         })
-        : await bulkAccessService.unverifyEveryone(guild);
+        : await bulkAccessService.unverifyEveryone(guild, {
+          onMemberUpdated(targetMember) {
+            return privateNoticeService.sendAccessNotice({
+              channel: notificationChannel,
+              member: targetMember,
+              kind: notifyKind,
+            });
+          },
+        });
       const lines = [
         commandName === "unwave-all" ? "**Unwave All Complete**" : "**Unverify All Complete**",
         `Targeted members: ${result.targeted}`,
         `Updated members: ${result.updated}`,
         `Failed members: ${result.failures.length}`,
+        `Private notices delivered: ${result.notificationsDelivered}`,
+        `Private notices failed: ${result.notificationFailures.length}`,
       ];
       if (commandName === "unwave-all") {
         lines.push(`Skipped exempt members: ${result.skippedExempt}`);
@@ -2752,6 +2788,8 @@ client.on("interactionCreate", async (interaction) => {
 
     const targetUser = interaction.options.getUser("user");
     const targetMember = await guild.members.fetch(targetUser.id);
+    const notificationChannel = interaction.options.getChannel("notificationchannel")
+      || (interaction.channel?.type === ChannelType.GuildText ? interaction.channel : null);
 
     try {
       await ensureEphemeralDefer(interaction);
@@ -2769,7 +2807,16 @@ client.on("interactionCreate", async (interaction) => {
       unlinkedUsers.add(targetUser.id);
       await verificationDb.deleteVerificationByDiscordId(targetUser.id);
 
-      return sendInteractionResponse(interaction, `✅ Successfully unlinked ${targetUser.tag}`);
+      const notice = await privateNoticeService.sendAccessNotice({
+        channel: notificationChannel,
+        member: targetMember,
+        kind: "unverified",
+      });
+
+      return sendInteractionResponse(
+        interaction,
+        `✅ Successfully unlinked ${targetUser.tag}.${notice ? ` They were notified by ${notice.deliveredBy}.` : " Their private notice could not be delivered."}`
+      );
 
     } catch (err) {
       console.error("Unlink error:", err);

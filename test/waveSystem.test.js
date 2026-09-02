@@ -333,6 +333,26 @@ test("staff can deny a pending wave application without Roblox automation", asyn
   assert.match(responseText, /denied/i);
 });
 
+test("wave button explains when a surviving Verified role has lost its saved link", async () => {
+  let reply;
+  const service = createWaveService({
+    client: {},
+    store: { async getSession() { return session({ applicationLimit: 5 }); } },
+    verifiedRoleId: "verified-role",
+    verificationService: { async lookup() { return { verified: false }; } },
+  });
+  const interaction = {
+    customId: "wave|apply|TV-WAVE-TEST",
+    user: { id: "discord" },
+    member: { roles: { cache: { has(roleId) { return roleId === "verified-role"; } } } },
+    async reply(payload) { reply = payload; },
+  };
+
+  assert.equal(await service.handleButton(interaction), true);
+  assert.match(reply.content, /saved Roblox account link is missing/i);
+  assert.match(reply.content, /repair/i);
+});
+
 test("slash command registration includes the wave workflow", async () => {
   let commands;
   await registerSlashCommands({
@@ -349,6 +369,10 @@ test("slash command registration includes the wave workflow", async () => {
   assert.ok(commands.map((command) => command.toJSON()).some((command) => command.name === "verifygroup"));
   assert.ok(commands.map((command) => command.toJSON()).some((command) => command.name === "unwave-all"));
   assert.ok(commands.map((command) => command.toJSON()).some((command) => command.name === "unverify-all"));
+  const unwaveAll = commands.map((command) => command.toJSON()).find((command) => command.name === "unwave-all");
+  const unverifyAll = commands.map((command) => command.toJSON()).find((command) => command.name === "unverify-all");
+  assert.equal(unwaveAll.options.find((option) => option.name === "notificationchannel").required, true);
+  assert.equal(unverifyAll.options.find((option) => option.name === "notificationchannel").required, true);
 });
 
 test("review payload exposes staff actions only while an application is pending", () => {

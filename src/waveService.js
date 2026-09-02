@@ -216,6 +216,7 @@ function createWaveService({
   client,
   store,
   verificationService,
+  verifiedRoleId = "",
   robloxGroupUrl = "",
   canReviewInteraction = async () => false,
   logger = console,
@@ -225,6 +226,23 @@ function createWaveService({
   }
 
   const timers = new Map();
+
+  function interactionHasVerifiedRole(interaction) {
+    return Boolean(
+      verifiedRoleId
+      && (
+        interaction.member?.roles?.cache?.has?.(verifiedRoleId)
+        || interaction.member?.roles?.includes?.(verifiedRoleId)
+      )
+    );
+  }
+
+  function missingVerificationMessage(interaction) {
+    if (interactionHasVerifiedRole(interaction)) {
+      return "Your Discord Verified role is present, but its saved Roblox account link is missing. Run `/verify` once to repair the link before applying.";
+    }
+    return "Connect your Roblox account with `/verify` before applying to Thornvale.";
+  }
 
   async function editSessionMessage(session) {
     if (!session?.channelId || !session?.messageId) return;
@@ -541,7 +559,7 @@ function createWaveService({
     const verification = await verificationService.lookup({ discordId: interaction.user.id });
     if (!verification.verified) {
       await interaction.reply({
-        content: "Connect your Roblox account with `/verify` before applying to Thornvale.",
+        content: missingVerificationMessage(interaction),
         ephemeral: true,
       });
       return true;
@@ -563,7 +581,7 @@ function createWaveService({
 
     const verification = await verificationService.lookup({ discordId: interaction.user.id });
     if (!verification.verified) {
-      await interaction.editReply("Your Roblox verification is missing. Run `/verify`, then apply again.");
+      await interaction.editReply(missingVerificationMessage(interaction));
       return true;
     }
 
