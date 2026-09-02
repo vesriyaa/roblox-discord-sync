@@ -47,8 +47,11 @@ function normalizeApplication(row) {
     robloxUsername: row.roblox_username,
     candidateAnswer: row.candidate_answer,
     discoveryAnswer: row.discovery_answer,
+    applicantThreadId: row.applicant_thread_id ? String(row.applicant_thread_id) : null,
     status: row.status,
     statusMessage: row.status_message || null,
+    reviewerDiscordId: row.reviewer_discord_id ? String(row.reviewer_discord_id) : null,
+    reviewedAt: toIso(row.reviewed_at),
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
   };
@@ -59,6 +62,7 @@ function createMemoryStore() {
   const applications = new Map();
 
   const cloneSession = (session) => session ? { ...session } : null;
+  const cloneApplication = (application) => application ? { ...application } : null;
 
   function closeExpired(session) {
     if (session?.status === "open" && new Date(session.endsAt).getTime() <= Date.now()) {
@@ -141,8 +145,11 @@ function createMemoryStore() {
 
       const record = {
         ...application,
-        status: "processing",
+        applicantThreadId: null,
+        status: "pending",
         statusMessage: null,
+        reviewerDiscordId: null,
+        reviewedAt: null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -153,15 +160,56 @@ function createMemoryStore() {
         session.closeReason = "capacity";
         session.closedAt = new Date().toISOString();
       }
-      return { ok: true, session: cloneSession(session), application: { ...record } };
+      return { ok: true, session: cloneSession(session), application: cloneApplication(record) };
     },
-    async updateApplicationStatus(id, status, statusMessage) {
+    async getApplication(id) {
+      return cloneApplication(applications.get(id));
+    },
+    async findAcceptedApplication(discordId, robloxUserId) {
+      const matches = Array.from(applications.values())
+        .filter((application) => (
+          application.status === "accepted"
+          && application.discordId === String(discordId)
+          && application.robloxUserId === String(robloxUserId)
+        ))
+        .sort((left, right) => new Date(right.reviewedAt || right.updatedAt) - new Date(left.reviewedAt || left.updatedAt));
+      return cloneApplication(matches[0]);
+    },
+    async updateApplicationContext(id, { applicantThreadId } = {}) {
+      const application = applications.get(id);
+      if (!application) return null;
+      if (applicantThreadId !== undefined) {
+        application.applicantThreadId = applicantThreadId ? String(applicantThreadId) : null;
+      }
+      application.updatedAt = new Date().toISOString();
+      return cloneApplication(application);
+    },
+    async claimApplication(id, reviewerDiscordId) {
+      const application = applications.get(id);
+      if (!application) return { ok: false, code: "APPLICATION_NOT_FOUND" };
+      const staleClaim = application.status === "processing"
+        && (Date.now() - new Date(application.updatedAt).getTime()) >= 5 * 60_000;
+      if (application.status !== "pending" && !staleClaim) {
+        return { ok: false, code: "ALREADY_REVIEWED", application: cloneApplication(application) };
+      }
+      application.status = "processing";
+      application.statusMessage = null;
+      application.reviewerDiscordId = String(reviewerDiscordId);
+      application.reviewedAt = null;
+      application.updatedAt = new Date().toISOString();
+      return { ok: true, application: cloneApplication(application) };
+    },
+    async updateApplicationStatus(id, status, statusMessage, reviewerDiscordId = null) {
       const application = applications.get(id);
       if (!application) return null;
       application.status = status;
       application.statusMessage = statusMessage || null;
+      application.reviewerDiscordId = reviewerDiscordId ? String(reviewerDiscordId) : null;
+      application.reviewedAt = new Set(["accepted", "denied"]).has(status)
+        ? new Date().toISOString()
+        : null;
       application.updatedAt = new Date().toISOString();
-      return { ...application };
+      return cloneApplication(application);
     },
   };
 }
@@ -203,14 +251,20 @@ function createPostgresStore() {
           roblox_username TEXT NOT NULL,
           candidate_answer TEXT NOT NULL,
           discovery_answer TEXT NOT NULL,
-          status TEXT NOT NULL DEFAULT 'processing',
+          applicant_thread_id TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
           status_message TEXT,
+          reviewer_discord_id TEXT,
+          reviewed_at TIMESTAMPTZ,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           UNIQUE (wave_id, discord_id),
           UNIQUE (wave_id, roblox_user_id)
         )
       `);
+      await pool.query("ALTER TABLE wave_applications ADD COLUMN IF NOT EXISTS applicant_thread_id TEXT");
+      await pool.query("ALTER TABLE wave_applications ADD COLUMN IF NOT EXISTS reviewer_discord_id TEXT");
+      await pool.query("ALTER TABLE wave_applications ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ");
       await pool.query("UPDATE wave_sessions SET status = 'closed', close_reason = 'time', closed_at = NOW() WHERE status = 'open' AND ends_at <= NOW()");
       await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS wave_sessions_one_open_per_guild ON wave_sessions (guild_id) WHERE status = 'open'");
     },
@@ -330,8 +384,8 @@ function createPostgresStore() {
         const applicationResult = await connection.query(
           `INSERT INTO wave_applications (
              id, wave_id, discord_id, roblox_user_id, roblox_username,
-             candidate_answer, discovery_answer
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+             candidate_answer, discovery_answer, status
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
            RETURNING *`,
           [
             application.id,
@@ -371,13 +425,61 @@ function createPostgresStore() {
         connection.release();
       }
     },
-    async updateApplicationStatus(id, status, statusMessage) {
+    async getApplication(id) {
+      const result = await pool.query("SELECT * FROM wave_applications WHERE id = $1", [id]);
+      return normalizeApplication(result.rows[0]);
+    },
+    async findAcceptedApplication(discordId, robloxUserId) {
+      const result = await pool.query(
+        `SELECT * FROM wave_applications
+         WHERE discord_id = $1 AND roblox_user_id = $2 AND status = 'accepted'
+         ORDER BY reviewed_at DESC NULLS LAST, updated_at DESC
+         LIMIT 1`,
+        [String(discordId), String(robloxUserId)]
+      );
+      return normalizeApplication(result.rows[0]);
+    },
+    async updateApplicationContext(id, { applicantThreadId } = {}) {
       const result = await pool.query(
         `UPDATE wave_applications
-         SET status = $2, status_message = $3, updated_at = NOW()
+         SET applicant_thread_id = COALESCE($2, applicant_thread_id), updated_at = NOW()
          WHERE id = $1
          RETURNING *`,
-        [id, status, statusMessage || null]
+        [id, applicantThreadId ? String(applicantThreadId) : null]
+      );
+      return normalizeApplication(result.rows[0]);
+    },
+    async claimApplication(id, reviewerDiscordId) {
+      const staleBefore = new Date(Date.now() - 5 * 60_000).toISOString();
+      const result = await pool.query(
+        `UPDATE wave_applications
+         SET status = 'processing', status_message = NULL,
+             reviewer_discord_id = $2, reviewed_at = NULL, updated_at = NOW()
+         WHERE id = $1
+           AND (status = 'pending' OR (status = 'processing' AND updated_at <= $3))
+         RETURNING *`,
+        [id, String(reviewerDiscordId), staleBefore]
+      );
+      if (result.rows[0]) {
+        return { ok: true, application: normalizeApplication(result.rows[0]) };
+      }
+      const application = await this.getApplication(id);
+      return {
+        ok: false,
+        code: application ? "ALREADY_REVIEWED" : "APPLICATION_NOT_FOUND",
+        application,
+      };
+    },
+    async updateApplicationStatus(id, status, statusMessage, reviewerDiscordId = null) {
+      const result = await pool.query(
+        `UPDATE wave_applications
+         SET status = $2, status_message = $3,
+             reviewer_discord_id = $4,
+             reviewed_at = CASE WHEN $2 IN ('accepted', 'denied') THEN NOW() ELSE NULL END,
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING *`,
+        [id, status, statusMessage || null, reviewerDiscordId ? String(reviewerDiscordId) : null]
       );
       return normalizeApplication(result.rows[0]);
     },

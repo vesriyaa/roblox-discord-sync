@@ -79,6 +79,7 @@ const {
   buildDiscordMessageUrl,
   formatOptionalString,
   parseChannelIdInput,
+  parseDiscordIdList,
   parsePositiveInteger,
   parseTimestamp,
 } = require("./src/utils");
@@ -89,6 +90,8 @@ const { createGameApiDocsHtml, createGameApiOpenApiSpec } = require("./src/gameA
 const { createUserActionService } = require("./src/userActionService");
 const { createWebhookService } = require("./src/webhookService");
 const { createRobloxGroupService } = require("./src/robloxGroupService");
+const { createBulkAccessService } = require("./src/bulkAccessService");
+const { createGroupAccessService } = require("./src/groupAccessService");
 const { createWaveStore } = require("./src/waveStore");
 const { createWaveService } = require("./src/waveService");
 
@@ -112,12 +115,35 @@ const robloxGroupService = createRobloxGroupService({
   cookie: process.env.ROBLOX_COOKIE,
 });
 const waveStore = createWaveStore();
+const bulkAccessService = createBulkAccessService({
+  verificationDb,
+  verifiedRoleId: VERIFIED_ROLE_ID,
+  envisionedRoleId: ENVISIONED_ROLE_ID,
+  unwavedRoleId: UNWAVED_ROLE_ID,
+  teamRoleIds: Object.values(roleMap),
+  defaultUnwaveExemptRoleIds: Array.from(INACTIVITY_EXEMPT_ROLE_IDS),
+  isUnwaveExemptMember(member) {
+    return hasAdminPermissions(member, "unlink");
+  },
+  onVerificationRemoved(record) {
+    if (record?.discordId) unlinkedUsers.add(record.discordId);
+  },
+});
+const groupAccessService = createGroupAccessService({
+  verificationService,
+  waveStore,
+  robloxGroupService,
+  onAccessGranted: updateGroupAcceptRoles,
+});
 const waveService = createWaveService({
   client,
   store: waveStore,
   verificationService,
-  robloxGroupService,
-  onAcceptedMember: updateGroupAcceptRoles,
+  robloxGroupUrl: robloxGroupService.getGroupUrl(),
+  async canReviewInteraction(interaction) {
+    const { member } = await getInteractionMember(interaction);
+    return hasAdminPermissions(member, "wave");
+  },
 });
 const userActionService = createUserActionService({
   client,
@@ -156,9 +182,12 @@ const spreadsheetPermissionService = createSpreadsheetPermissionService({
 });
 const EAGER_DEFERRED_COMMANDS = new Set([
   "unlink",
+  "unwave-all",
+  "unverify-all",
   "dm",
   "groupaccept",
   "wave",
+  "verifygroup",
   "inactive-check",
   "wipe",
   "unwipe",
@@ -171,6 +200,7 @@ const EAGER_DEFERRED_COMMANDS = new Set([
 ]);
 const MEMBER_COMMAND_ROLE_ID = process.env.MEMBER_COMMAND_ROLE_ID || "1415902349192331383";
 const MEMBER_ALLOWED_COMMANDS = new Set(["verify", "getroles"]);
+const SELF_SERVICE_COMMANDS = new Set(["verifygroup"]);
 const REVIEW_DISCORD_ID_PREFIX = "oauth-review:";
 let commandBarLogChannelPromise = null;
 
@@ -1475,6 +1505,9 @@ function hasMemberCommandRole(member) {
 
 async function ensureChatInputCommandAccess(interaction, member) {
   const commandKey = normalizeCommandKey(interaction.commandName);
+  if (SELF_SERVICE_COMMANDS.has(commandKey)) {
+    return true;
+  }
   const access = await spreadsheetPermissionService.getMemberAccess(member);
 
   if (access.record || hasModPermissions(member)) {
@@ -2597,11 +2630,97 @@ client.on("interactionCreate", async (interaction) => {
     });
   }
 
+  if (interaction.commandName === "verifygroup") {
+    try {
+      const result = await groupAccessService.completeApprovedAccess({
+        discordId: interaction.user.id,
+        member,
+      });
+      return sendInteractionResponse(
+        interaction,
+        result.alreadyMember
+          ? "Your Roblox group membership is already active and your Thornvale access roles are updated."
+          : "Your Roblox group request was accepted and your Thornvale access roles are now updated."
+      );
+    } catch (err) {
+      console.error(`verifygroup failed for ${interaction.user.id}:`, err);
+      if (err?.code === "NOT_VERIFIED") {
+        return sendInteractionResponse(
+          interaction,
+          "Connect your Roblox account with `/verify` before completing group access."
+        );
+      }
+      if (err?.code === "APPLICATION_NOT_ACCEPTED") {
+        return sendInteractionResponse(
+          interaction,
+          "You do not have an accepted Thornvale wave application yet. Wait for staff to approve it first."
+        );
+      }
+      return sendInteractionResponse(
+        interaction,
+        `I could not find or accept your Roblox group request yet. [Request to join the Thornvale group](${groupAccessService.getGroupUrl()}), then run \`/verifygroup\` again.`
+      );
+    }
+  }
+
   if (interaction.commandName === "wave") {
     if (!await ensureAdminPermission(interaction, member, "wave")) {
       return;
     }
     return waveService.handleCommand(interaction);
+  }
+
+  if (interaction.commandName === "unwave-all" || interaction.commandName === "unverify-all") {
+    const commandName = interaction.commandName;
+    if (!await ensureAdminPermission(interaction, member, commandName)) {
+      return;
+    }
+
+    const expectedConfirmation = commandName === "unwave-all" ? "UNWAVE ALL" : "UNVERIFY ALL";
+    const confirmation = String(interaction.options.getString("confirmation", true) || "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .toUpperCase();
+    if (confirmation !== expectedConfirmation) {
+      return sendInteractionResponse(
+        interaction,
+        `Nothing was changed. Type \`${expectedConfirmation}\` exactly in the confirmation field.`
+      );
+    }
+
+    try {
+      const result = commandName === "unwave-all"
+        ? await bulkAccessService.unwaveEveryone(guild, {
+          exemptRoleIds: parseDiscordIdList(interaction.options.getString("exemptroles")),
+        })
+        : await bulkAccessService.unverifyEveryone(guild);
+      const lines = [
+        commandName === "unwave-all" ? "**Unwave All Complete**" : "**Unverify All Complete**",
+        `Targeted members: ${result.targeted}`,
+        `Updated members: ${result.updated}`,
+        `Failed members: ${result.failures.length}`,
+      ];
+      if (commandName === "unwave-all") {
+        lines.push(`Skipped exempt members: ${result.skippedExempt}`);
+      }
+      if (commandName === "unverify-all") {
+        lines.push(`Verification links deleted: ${result.linksDeleted}`);
+      }
+      if (result.failures.length > 0) {
+        lines.push(
+          "",
+          "**Failures**",
+          ...result.failures.slice(0, 10).map((failure) => `<@${failure.discordId}> — ${failure.message}`)
+        );
+      }
+      return sendInteractionResponse(interaction, trimDiscordMessage(lines));
+    } catch (err) {
+      console.error(`${commandName} failed:`, err);
+      return sendInteractionResponse(
+        interaction,
+        `The bulk operation failed: ${String(err?.message || err).slice(0, 800)}`
+      );
+    }
   }
 
   // ===============================

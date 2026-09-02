@@ -25,6 +25,32 @@ function buildSlashCommands() {
       ),
 
     new SlashCommandBuilder()
+      .setName("unwave-all")
+      .setDescription("Remove waved access from every currently waved member")
+      .addStringOption((option) =>
+        option.setName("confirmation")
+          .setDescription("Type UNWAVE ALL to confirm")
+          .setMaxLength(20)
+          .setRequired(true)
+      )
+      .addStringOption((option) =>
+        option.setName("exemptroles")
+          .setDescription("Extra role mentions or IDs to skip, separated by spaces")
+          .setMaxLength(1000)
+          .setRequired(false)
+      ),
+
+    new SlashCommandBuilder()
+      .setName("unverify-all")
+      .setDescription("Remove every verification link and verified role")
+      .addStringOption((option) =>
+        option.setName("confirmation")
+          .setDescription("Type UNVERIFY ALL to confirm")
+          .setMaxLength(20)
+          .setRequired(true)
+      ),
+
+    new SlashCommandBuilder()
       .setName("dm")
       .setDescription("Send a direct message from the Thornvale bot")
       .addUserOption((option) =>
@@ -42,6 +68,10 @@ function buildSlashCommands() {
     new SlashCommandBuilder()
       .setName("getroles")
       .setDescription("Restore your team roles from Roblox"),
+
+    new SlashCommandBuilder()
+      .setName("verifygroup")
+      .setDescription("Complete Roblox group access after an accepted wave application"),
 
     new SlashCommandBuilder()
       .setName("inactive-check")
@@ -222,7 +252,7 @@ function buildSlashCommands() {
           .addChannelOption((option) =>
             option.setName("channel")
               .setDescription("Channel for the public wave panel (defaults to this channel)")
-              .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+              .addChannelTypes(ChannelType.GuildText)
               .setRequired(false)
           )
       )
