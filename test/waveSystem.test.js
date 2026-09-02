@@ -371,8 +371,8 @@ test("slash command registration includes the wave workflow", async () => {
   assert.ok(commands.map((command) => command.toJSON()).some((command) => command.name === "unverify-all"));
   const unwaveAll = commands.map((command) => command.toJSON()).find((command) => command.name === "unwave-all");
   const unverifyAll = commands.map((command) => command.toJSON()).find((command) => command.name === "unverify-all");
-  assert.equal(unwaveAll.options.find((option) => option.name === "notificationchannel").required, true);
-  assert.equal(unverifyAll.options.find((option) => option.name === "notificationchannel").required, true);
+  assert.equal(unwaveAll.options.some((option) => option.name === "notificationchannel"), false);
+  assert.equal(unverifyAll.options.some((option) => option.name === "notificationchannel"), false);
 });
 
 test("review payload exposes staff actions only while an application is pending", () => {
