@@ -8,11 +8,18 @@ function member(id, roleIds, { bot = false } = {}) {
     id,
     user: { bot },
     roles: {
-      cache: { has(roleId) { return roles.has(roleId); } },
+      cache: {
+        has(roleId) { return roles.has(roleId); },
+        values() { return Array.from(roles, (roleId) => ({ id: roleId }))[Symbol.iterator](); },
+      },
       async remove(values) {
         for (const roleId of Array.isArray(values) ? values : [values]) roles.delete(roleId);
       },
       async add(roleId) { roles.add(roleId); },
+      async set(values) {
+        roles.clear();
+        for (const roleId of values) roles.add(roleId);
+      },
     },
     hasRole(roleId) { return roles.has(roleId); },
   };
@@ -26,8 +33,8 @@ function guildWithMembers(members) {
   };
 }
 
-test("unwave everyone removes waved access but preserves verification", async () => {
-  const waved = member("waved", ["verified", "envisioned", "team"]);
+test("unwave everyone strips a waved member down to Wald and notifies them", async () => {
+  const waved = member("waved", ["verified", "envisioned", "team", "unrelated"]);
   const verifiedOnly = member("verified", ["verified"]);
   const staff = member("staff", ["verified", "envisioned", "staff-role"]);
   const sheetStaff = member("sheet-staff", ["verified", "envisioned"]);
@@ -41,16 +48,25 @@ test("unwave everyone removes waved access but preserves verification", async ()
     async isUnwaveExemptMember(value) { return value.id === "sheet-staff"; },
   });
 
-  const result = await service.unwaveEveryone(guildWithMembers([waved, verifiedOnly, staff, sheetStaff]));
+  const notified = [];
+  const result = await service.unwaveEveryone(guildWithMembers([waved, verifiedOnly, staff, sheetStaff]), {
+    async onMemberUpdated(value) {
+      notified.push(value.id);
+      return { deliveredBy: "private thread" };
+    },
+  });
   assert.deepEqual({ targeted: result.targeted, updated: result.updated }, { targeted: 1, updated: 1 });
   assert.equal(result.skippedExempt, 2);
   assert.equal(waved.hasRole("envisioned"), false);
   assert.equal(waved.hasRole("team"), false);
-  assert.equal(waved.hasRole("verified"), true);
+  assert.equal(waved.hasRole("verified"), false);
+  assert.equal(waved.hasRole("unrelated"), false);
   assert.equal(waved.hasRole("unwaved"), true);
   assert.equal(verifiedOnly.hasRole("verified"), true);
   assert.equal(staff.hasRole("envisioned"), true);
   assert.equal(sheetStaff.hasRole("envisioned"), true);
+  assert.deepEqual(notified, ["waved"]);
+  assert.equal(result.notificationsDelivered, 1);
 });
 
 test("unwave everyone accepts extra exempt roles for a single run", async () => {

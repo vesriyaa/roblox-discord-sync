@@ -22,6 +22,12 @@ function buildSlashCommands() {
         option.setName("user")
           .setDescription("User to unlink")
           .setRequired(true)
+      )
+      .addChannelOption((option) =>
+        option.setName("notificationchannel")
+          .setDescription("Channel for the user's private unverified notice")
+          .addChannelTypes(ChannelType.GuildText)
+          .setRequired(false)
       ),
 
     new SlashCommandBuilder()
@@ -31,6 +37,12 @@ function buildSlashCommands() {
         option.setName("confirmation")
           .setDescription("Type UNWAVE ALL to confirm")
           .setMaxLength(20)
+          .setRequired(true)
+      )
+      .addChannelOption((option) =>
+        option.setName("notificationchannel")
+          .setDescription("Channel for private unwaved notices")
+          .addChannelTypes(ChannelType.GuildText)
           .setRequired(true)
       )
       .addStringOption((option) =>
@@ -47,6 +59,12 @@ function buildSlashCommands() {
         option.setName("confirmation")
           .setDescription("Type UNVERIFY ALL to confirm")
           .setMaxLength(20)
+          .setRequired(true)
+      )
+      .addChannelOption((option) =>
+        option.setName("notificationchannel")
+          .setDescription("Channel for private unverified notices")
+          .addChannelTypes(ChannelType.GuildText)
           .setRequired(true)
       ),
 
@@ -115,6 +133,12 @@ function buildSlashCommands() {
         subcommand
           .setName("confirm")
           .setDescription("Unwave inactive users, remove roles, unlink, and queue wipes")
+          .addChannelOption((option) =>
+            option.setName("notificationchannel")
+              .setDescription("Channel for private inactivity notices")
+              .addChannelTypes(ChannelType.GuildText)
+              .setRequired(true)
+          )
           .addIntegerOption((option) =>
             option.setName("days")
               .setDescription("Inactive after this many days")
