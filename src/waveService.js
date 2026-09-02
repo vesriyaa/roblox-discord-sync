@@ -217,6 +217,7 @@ function createWaveService({
   store,
   verificationService,
   verifiedRoleId = "",
+  applicantRoleIds = [],
   robloxGroupUrl = "",
   canReviewInteraction = async () => false,
   logger = console,
@@ -226,6 +227,10 @@ function createWaveService({
   }
 
   const timers = new Map();
+  const threadPermissionRoleIds = Array.from(new Set([
+    verifiedRoleId,
+    ...applicantRoleIds,
+  ].filter(Boolean)));
 
   function interactionHasVerifiedRole(interaction) {
     return Boolean(
@@ -242,6 +247,48 @@ function createWaveService({
       return "Your Discord Verified role is present, but its saved Roblox account link is missing. Run `/verify` once to repair the link before applying.";
     }
     return "Connect your Roblox account with `/verify` before applying to Thornvale.";
+  }
+
+  async function ensureApplicantThreadPermission(channel, context = "Thornvale wave applications") {
+    if (threadPermissionRoleIds.length === 0 || !channel?.permissionOverwrites?.edit) return false;
+    try {
+      for (const roleId of threadPermissionRoleIds) {
+        await channel.permissionOverwrites.edit(
+          roleId,
+          { SendMessagesInThreads: true },
+          { reason: `${context}: allow applicants to reply in their private thread` }
+        );
+      }
+      return true;
+    } catch (err) {
+      logger.error(`Wave applicant thread permission repair failed for channel ${channel?.id || "unknown"}:`, err);
+      return false;
+    }
+  }
+
+  async function repairExistingApplicantThreads(session) {
+    const channel = await client.channels.fetch(session.channelId).catch(() => null);
+    if (!channel) return;
+
+    await ensureApplicantThreadPermission(channel, `Restoring wave ${session.id}`);
+    if (typeof store.listApplicationsForWave !== "function") return;
+
+    const applications = await store.listApplicationsForWave(session.id);
+    for (const application of applications) {
+      if (!application.applicantThreadId || application.status === "denied") continue;
+      try {
+        const thread = await client.channels.fetch(application.applicantThreadId);
+        if (!thread || thread.locked) continue;
+        if (thread.archived && typeof thread.setArchived === "function") {
+          await thread.setArchived(false, "Restoring active Thornvale wave application");
+        }
+        if (typeof thread.members?.add === "function") {
+          await thread.members.add(application.discordId);
+        }
+      } catch (err) {
+        logger.error(`Application ${application.id} private thread repair failed:`, err);
+      }
+    }
   }
 
   async function editSessionMessage(session) {
@@ -301,6 +348,7 @@ function createWaveService({
       if (channel?.type !== ChannelType.GuildText || typeof channel.threads?.create !== "function") {
         return null;
       }
+      await ensureApplicantThreadPermission(channel, `Creating application ${application.id}`);
       const thread = await channel.threads.create({
         name: `application-${application.robloxUsername}-${application.id.slice(-6)}`.slice(0, 100),
         autoArchiveDuration: 1440,
@@ -662,7 +710,10 @@ function createWaveService({
     const sessions = await store.listOpenSessions();
     for (const session of sessions) {
       const current = await reconcileSession(session);
-      if (current?.status === "open") scheduleClose(current);
+      if (current?.status === "open") {
+        await repairExistingApplicantThreads(current);
+        scheduleClose(current);
+      }
     }
     logger.log(`Wave system ready (${store.type}); restored ${sessions.length} open session(s).`);
   }

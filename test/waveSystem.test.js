@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { MEMBER_COMMAND_ROLE_IDS } = require("../src/config");
 const { createRobloxGroupService } = require("../src/robloxGroupService");
 const { registerSlashCommands } = require("../src/registerSlashCommands");
 const {
@@ -57,6 +58,71 @@ test("wave durations accept shorthand, compounds, and legacy minute values", () 
   assert.equal(parseWaveDuration("tomorrow"), null);
 });
 
+test("Wald and Envisioned members can access member verification commands", () => {
+  assert.equal(MEMBER_COMMAND_ROLE_IDS.has("1415902349192331381"), true);
+  assert.equal(MEMBER_COMMAND_ROLE_IDS.has("1415902349192331383"), true);
+});
+
+test("restoring an open wave repairs existing private applicant threads", async () => {
+  const activeSession = session({ applicationLimit: 5 });
+  const permissionEdits = [];
+  const memberAdds = [];
+  const archiveChanges = [];
+  const applicationChannel = {
+    id: activeSession.channelId,
+    permissionOverwrites: {
+      async edit(roleId, permissions) {
+        permissionEdits.push({ roleId, permissions });
+      },
+    },
+  };
+  const applicantThread = {
+    id: "applicant-thread",
+    archived: true,
+    locked: false,
+    async setArchived(value) { archiveChanges.push(value); },
+    members: {
+      async add(discordId) { memberAdds.push(discordId); },
+    },
+  };
+  const service = createWaveService({
+    client: {
+      channels: {
+        async fetch(channelId) {
+          if (channelId === activeSession.channelId) return applicationChannel;
+          if (channelId === applicantThread.id) return applicantThread;
+          return null;
+        },
+      },
+    },
+    store: {
+      type: "test",
+      async init() {},
+      async listOpenSessions() { return [activeSession]; },
+      async listApplicationsForWave() {
+        return [{
+          id: "TV-APP-EXISTING",
+          applicantThreadId: applicantThread.id,
+          discordId: "existing-applicant",
+          status: "pending",
+        }];
+      },
+    },
+    verificationService: {},
+    verifiedRoleId: "verified-role",
+    applicantRoleIds: ["wald-role", "verified-role"],
+  });
+
+  await service.init();
+
+  assert.deepEqual(permissionEdits, [
+    { roleId: "verified-role", permissions: { SendMessagesInThreads: true } },
+    { roleId: "wald-role", permissions: { SendMessagesInThreads: true } },
+  ]);
+  assert.deepEqual(archiveChanges, [false]);
+  assert.deepEqual(memberAdds, ["existing-applicant"]);
+});
+
 test("wave store prevents duplicate applications and closes at capacity", async () => {
   const store = createMemoryStore();
   const created = await store.createSession(session());
@@ -74,6 +140,8 @@ test("wave store prevents duplicate applications and closes at capacity", async 
   assert.equal(reserved.session.status, "closed");
   assert.equal(reserved.session.closeReason, "capacity");
   assert.equal(reserved.session.applicationCount, 1);
+  const listedApplications = await store.listApplicationsForWave(created.id);
+  assert.deepEqual(listedApplications.map((entry) => entry.id), [application.id]);
 
   const duplicate = await store.reserveApplication({ ...application, id: "TV-APP-2" });
   assert.equal(duplicate.ok, false);

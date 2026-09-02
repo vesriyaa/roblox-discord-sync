@@ -165,6 +165,12 @@ function createMemoryStore() {
     async getApplication(id) {
       return cloneApplication(applications.get(id));
     },
+    async listApplicationsForWave(waveId) {
+      return Array.from(applications.values())
+        .filter((application) => application.waveId === String(waveId))
+        .sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt))
+        .map(cloneApplication);
+    },
     async findAcceptedApplication(discordId, robloxUserId) {
       const matches = Array.from(applications.values())
         .filter((application) => (
@@ -428,6 +434,13 @@ function createPostgresStore() {
     async getApplication(id) {
       const result = await pool.query("SELECT * FROM wave_applications WHERE id = $1", [id]);
       return normalizeApplication(result.rows[0]);
+    },
+    async listApplicationsForWave(waveId) {
+      const result = await pool.query(
+        "SELECT * FROM wave_applications WHERE wave_id = $1 ORDER BY created_at ASC",
+        [String(waveId)]
+      );
+      return result.rows.map(normalizeApplication);
     },
     async findAcceptedApplication(discordId, robloxUserId) {
       const result = await pool.query(

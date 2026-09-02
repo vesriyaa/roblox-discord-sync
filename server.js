@@ -42,6 +42,7 @@ const {
   INACTIVITY_MAX_LIMIT,
   INACTIVITY_NEAR_DAYS,
   INTERACTION_FOLLOW_UP_WINDOW_MS,
+  MEMBER_COMMAND_ROLE_IDS,
   MOD_ROLE_ID,
   PUBLIC_BASE_URL,
   ROBLOX_OAUTH_CLIENT_ID,
@@ -145,6 +146,7 @@ const waveService = createWaveService({
   store: waveStore,
   verificationService,
   verifiedRoleId: VERIFIED_ROLE_ID,
+  applicantRoleIds: [WALD_ROLE_ID, VERIFIED_ROLE_ID],
   robloxGroupUrl: robloxGroupService.getGroupUrl(),
   async canReviewInteraction(interaction) {
     const { member } = await getInteractionMember(interaction);
@@ -204,7 +206,6 @@ const EAGER_DEFERRED_COMMANDS = new Set([
   "shutdown",
   "grouprank",
 ]);
-const MEMBER_COMMAND_ROLE_ID = process.env.MEMBER_COMMAND_ROLE_ID || "1415902349192331383";
 const MEMBER_ALLOWED_COMMANDS = new Set(["verify", "getroles"]);
 const SELF_SERVICE_COMMANDS = new Set(["verifygroup"]);
 const REVIEW_DISCORD_ID_PREFIX = "oauth-review:";
@@ -1523,7 +1524,7 @@ function hasModPermissions(member) {
 }
 
 function hasMemberCommandRole(member) {
-  return Boolean(MEMBER_COMMAND_ROLE_ID && member.roles.cache.has(MEMBER_COMMAND_ROLE_ID));
+  return Array.from(MEMBER_COMMAND_ROLE_IDS).some((roleId) => member.roles.cache.has(roleId));
 }
 
 async function ensureChatInputCommandAccess(interaction, member) {
