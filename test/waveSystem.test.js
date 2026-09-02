@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const { createRobloxGroupService } = require("../src/robloxGroupService");
 const { registerSlashCommands } = require("../src/registerSlashCommands");
 const {
+  buildApplicationReviewPayload,
   buildWavePayload,
   createWaveService,
   isMatchingVerification,
@@ -79,6 +80,28 @@ test("wave store prevents duplicate applications and closes at capacity", async 
   assert.equal(duplicate.code, "WAVE_CLOSED");
 });
 
+test("only one staff reviewer can claim a pending application", async () => {
+  const store = createMemoryStore();
+  const created = await store.createSession(session({ applicationLimit: 2 }));
+  const reserved = await store.reserveApplication({
+    id: "TV-APP-CLAIM",
+    waveId: created.id,
+    discordId: "discord",
+    robloxUserId: "123456",
+    robloxUsername: "Builder_One",
+    candidateAnswer: "A sufficiently complete candidate answer.",
+    discoveryAnswer: "A friend invited me.",
+  });
+  assert.equal(reserved.application.status, "pending");
+  assert.equal((await store.claimApplication(reserved.application.id, "staff-one")).ok, true);
+  const secondClaim = await store.claimApplication(reserved.application.id, "staff-two");
+  assert.equal(secondClaim.ok, false);
+  assert.equal(secondClaim.application.reviewerDiscordId, "staff-one");
+  await store.updateApplicationStatus(reserved.application.id, "accepted", "Approved", "staff-one");
+  const approved = await store.findAcceptedApplication("discord", "123456");
+  assert.equal(approved.id, reserved.application.id);
+});
+
 test("closed wave panel is Thornvale branded and disables applications", () => {
   const payload = buildWavePayload(session({
     status: "closed",
@@ -113,35 +136,95 @@ test("Roblox group acceptance reuses one CSRF-aware service", async () => {
   assert.equal(requests[1].options.headers["x-csrf-token"], "csrf");
 });
 
-test("verified wave submissions accept the join request, update roles, and log answers", async () => {
+test("Roblox group membership uses the public recommended roles endpoint", async () => {
+  const service = createRobloxGroupService({
+    groupId: "99",
+    cookie: "secret-cookie",
+    async fetchImpl(url, options) {
+      assert.equal(url, "https://groups.roblox.com/v2/users/123456/groups/roles");
+      assert.equal(options.method, "GET");
+      return {
+        ok: true,
+        async json() {
+          return { data: [{ group: { id: 99 }, role: { id: 1, name: "Member" } }] };
+        },
+      };
+    },
+  });
+  const membership = await service.getMembership("123456");
+  assert.equal(membership.isMember, true);
+  assert.equal(membership.role.name, "Member");
+});
+
+test("verified wave submissions wait for staff and approval points applicants to verifygroup", async () => {
   const activeSession = session({ applicationLimit: 5 });
-  let acceptedUserId;
-  let updatedMember;
   let reviewPayload;
+  let updatedReviewPayload;
   let responseText;
+  let reviewResponseText;
+  let application;
+  const privateMessages = [];
+  const privateThread = {
+    id: "private-thread",
+    archived: false,
+    members: { async add(userId) { assert.equal(userId, "discord"); } },
+    async send(payload) { privateMessages.push(payload); },
+  };
   const store = {
     type: "memory",
     async getSession() { return activeSession; },
-    async reserveApplication(application) {
+    async reserveApplication(value) {
+      application = {
+        ...value,
+        status: "pending",
+        statusMessage: null,
+        applicantThreadId: null,
+        reviewerDiscordId: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
       return {
         ok: true,
         application,
         session: { ...activeSession, applicationCount: 1 },
       };
     },
-    async updateApplicationStatus() {},
+    async updateApplicationContext(id, context) {
+      assert.equal(id, application.id);
+      application = { ...application, ...context };
+      return application;
+    },
+    async claimApplication(id, reviewerDiscordId) {
+      assert.equal(id, application.id);
+      application = { ...application, status: "processing", reviewerDiscordId };
+      return { ok: true, application };
+    },
+    async updateApplicationStatus(id, status, statusMessage, reviewerDiscordId) {
+      assert.equal(id, application.id);
+      application = { ...application, status, statusMessage, reviewerDiscordId };
+      return application;
+    },
   };
-  const member = { roles: {} };
   const service = createWaveService({
     client: {
       channels: {
         async fetch(channelId) {
-          assert.equal(channelId, "review");
-          return { async send(payload) { reviewPayload = payload; } };
+          if (channelId === "channel") {
+            return {
+              type: 0,
+              threads: { async create() { return privateThread; } },
+            };
+          }
+          if (channelId === "review") {
+            return { async send(payload) { reviewPayload = payload; } };
+          }
+          if (channelId === "private-thread") return privateThread;
+          throw new Error(`Unexpected channel ${channelId}`);
         },
       },
     },
     store,
+    robloxGroupUrl: "https://www.roblox.com/communities/99",
     verificationService: {
       async lookup() {
         return {
@@ -152,10 +235,7 @@ test("verified wave submissions accept the join request, update roles, and log a
         };
       },
     },
-    robloxGroupService: {
-      async acceptJoinRequest(userId) { acceptedUserId = userId; },
-    },
-    async onAcceptedMember(value) { updatedMember = value; },
+    async canReviewInteraction() { return true; },
   });
   const interaction = {
     customId: `wave|submit|${activeSession.id}`,
@@ -163,7 +243,6 @@ test("verified wave submissions accept the join request, update roles, and log a
       id: "discord",
       async send() {},
     },
-    guild: { members: { async fetch() { return member; } } },
     fields: {
       getTextInputValue(field) {
         return {
@@ -178,10 +257,80 @@ test("verified wave submissions accept the join request, update roles, and log a
   };
 
   assert.equal(await service.handleModal(interaction), true);
-  assert.equal(acceptedUserId, "123456");
-  assert.equal(updatedMember, member);
-  assert.ok(reviewPayload.embeds?.length);
-  assert.match(responseText, /accepted/i);
+  assert.equal(application.status, "pending");
+  assert.equal(application.applicantThreadId, "private-thread");
+  assert.ok(reviewPayload.components?.[0]);
+  assert.match(responseText, /staff review/i);
+  assert.match(privateMessages[0].content, /waiting for staff review/i);
+  assert.match(privateMessages[0].content, /request to join the Roblox group/i);
+
+  const reviewInteraction = {
+    customId: `wave|review|accept|${application.id}`,
+    user: { id: "staff" },
+    message: { async edit(payload) { updatedReviewPayload = payload; } },
+    async deferReply() {},
+    async editReply(text) { reviewResponseText = text; },
+  };
+  assert.equal(await service.handleButton(reviewInteraction), true);
+  assert.equal(application.status, "accepted");
+  assert.match(privateMessages[1].content, /<@discord>.*accepted.*verifygroup/i);
+  assert.equal(updatedReviewPayload.components[0].components[0].toJSON().disabled, true);
+  assert.match(reviewResponseText, /accepted/i);
+});
+
+test("staff can deny a pending wave application without Roblox automation", async () => {
+  let application = {
+    id: "TV-APP-DENY",
+    waveId: "TV-WAVE-TEST",
+    discordId: "discord",
+    robloxUserId: "123456",
+    robloxUsername: "Builder_One",
+    candidateAnswer: "A sufficiently complete candidate answer.",
+    discoveryAnswer: "A friend invited me.",
+    applicantThreadId: "private-thread",
+    status: "pending",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  let robloxCalled = false;
+  let applicantMessage;
+  const service = createWaveService({
+    client: {
+      channels: {
+        async fetch() {
+          return { async send(payload) { applicantMessage = payload.content; } };
+        },
+      },
+    },
+    store: {
+      async claimApplication(id, reviewerDiscordId) {
+        application = { ...application, status: "processing", reviewerDiscordId };
+        return { ok: true, application };
+      },
+      async getSession() { return session(); },
+      async updateApplicationStatus(id, status, statusMessage, reviewerDiscordId) {
+        application = { ...application, status, statusMessage, reviewerDiscordId };
+        return application;
+      },
+    },
+    verificationService: { async lookup() { return { verified: true }; } },
+    robloxGroupService: { async acceptJoinRequest() { robloxCalled = true; } },
+    async canReviewInteraction() { return true; },
+  });
+  let responseText;
+  const interaction = {
+    customId: "wave|review|deny|TV-APP-DENY",
+    user: { id: "staff" },
+    message: { async edit() {} },
+    async deferReply() {},
+    async editReply(text) { responseText = text; },
+  };
+
+  assert.equal(await service.handleButton(interaction), true);
+  assert.equal(robloxCalled, false);
+  assert.equal(application.status, "denied");
+  assert.match(applicantMessage, /<@discord>.*denied/i);
+  assert.match(responseText, /denied/i);
 });
 
 test("slash command registration includes the wave workflow", async () => {
@@ -197,4 +346,29 @@ test("slash command registration includes the wave workflow", async () => {
   const duration = wave.options[0].options.find((option) => option.name === "duration");
   assert.equal(duration.type, 3);
   assert.match(duration.description, /1h/);
+  assert.ok(commands.map((command) => command.toJSON()).some((command) => command.name === "verifygroup"));
+  assert.ok(commands.map((command) => command.toJSON()).some((command) => command.name === "unwave-all"));
+  assert.ok(commands.map((command) => command.toJSON()).some((command) => command.name === "unverify-all"));
+});
+
+test("review payload exposes staff actions only while an application is pending", () => {
+  const baseApplication = {
+    id: "TV-APP-TEST",
+    discordId: "discord",
+    robloxUserId: "123456",
+    robloxUsername: "Builder_One",
+    candidateAnswer: "A sufficiently complete candidate answer.",
+    discoveryAnswer: "A friend invited me.",
+    createdAt: new Date().toISOString(),
+  };
+  const pending = buildApplicationReviewPayload(session(), {
+    ...baseApplication,
+    status: "pending",
+  });
+  assert.equal(pending.components[0].components[0].toJSON().disabled, false);
+  const accepted = buildApplicationReviewPayload(session(), {
+    ...baseApplication,
+    status: "accepted",
+  });
+  assert.equal(accepted.components[0].components[0].toJSON().disabled, true);
 });

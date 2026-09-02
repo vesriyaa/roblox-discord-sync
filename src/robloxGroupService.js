@@ -16,6 +16,44 @@ function createRobloxGroupService({ groupId, cookie, fetchImpl = fetch }) {
       return /^\d+$/.test(normalizedGroupId) && normalizedCookie.length > 0;
     },
 
+    getGroupUrl() {
+      return /^\d+$/.test(normalizedGroupId)
+        ? `https://www.roblox.com/communities/${normalizedGroupId}`
+        : "https://www.roblox.com/communities";
+    },
+
+    async getMembership(robloxUserId) {
+      const userId = String(robloxUserId || "").trim();
+      if (!/^\d+$/.test(userId)) {
+        throw new RobloxGroupError("INVALID_ROBLOX_ID", "A numeric Roblox user ID is required.", 400);
+      }
+      if (!/^\d+$/.test(normalizedGroupId)) {
+        throw new RobloxGroupError("ROBLOX_GROUP_NOT_CONFIGURED", "The Roblox group ID is not configured.", 503);
+      }
+
+      const response = await fetchImpl(
+        `https://groups.roblox.com/v2/users/${userId}/groups/roles`,
+        { method: "GET" }
+      );
+      if (!response.ok) {
+        throw new RobloxGroupError(
+          "ROBLOX_MEMBERSHIP_CHECK_FAILED",
+          `Roblox membership lookup failed with HTTP ${response.status}.`,
+          response.status || 502
+        );
+      }
+      const payload = await response.json();
+      const membership = Array.isArray(payload?.data)
+        ? payload.data.find((entry) => String(entry?.group?.id || "") === normalizedGroupId)
+        : null;
+      return {
+        isMember: Boolean(membership),
+        groupId: normalizedGroupId,
+        robloxUserId: userId,
+        role: membership?.role || null,
+      };
+    },
+
     async acceptJoinRequest(robloxUserId) {
       const userId = String(robloxUserId || "").trim();
       if (!/^\d+$/.test(userId)) {

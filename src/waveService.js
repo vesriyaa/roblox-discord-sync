@@ -3,6 +3,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   EmbedBuilder,
   ModalBuilder,
   TextInputBuilder,
@@ -14,6 +15,7 @@ const WAVE_COLOR = 0x2fb8df;
 const CLOSED_COLOR = 0xe74c3c;
 const APPLY_PREFIX = "wave|apply|";
 const SUBMIT_PREFIX = "wave|submit|";
+const REVIEW_PREFIX = "wave|review|";
 const MIN_WAVE_DURATION_MS = 60_000;
 const MAX_WAVE_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 const DURATION_UNIT_MS = Object.freeze({
@@ -158,16 +160,68 @@ function buildApplicationModal(session, verification) {
     );
 }
 
+function buildApplicationReviewPayload(session, application) {
+  const statusLabels = {
+    pending: "Pending Staff Review",
+    processing: "Review In Progress",
+    accepted: "Accepted",
+    denied: "Denied",
+  };
+  const statusColors = {
+    pending: 0xf1c40f,
+    processing: 0x3498db,
+    accepted: 0x2ecc71,
+    denied: 0xe74c3c,
+  };
+  const status = application.status || "pending";
+  const actionable = status === "pending";
+  const fields = [
+    { name: "Applicant", value: `<@${application.discordId}> (${application.discordId})`, inline: false },
+    { name: "Roblox", value: `${application.robloxUsername} (${application.robloxUserId})`, inline: false },
+    { name: "What makes you a good candidate?", value: application.candidateAnswer.slice(0, 1024), inline: false },
+    { name: "How did you find out about Thornvale?", value: application.discoveryAnswer.slice(0, 1024), inline: false },
+    { name: "Review Status", value: statusLabels[status] || status, inline: false },
+  ];
+  if (application.statusMessage) {
+    fields.push({ name: "Review Details", value: application.statusMessage.slice(0, 1024), inline: false });
+  }
+  if (application.reviewerDiscordId) {
+    fields.push({ name: "Reviewed By", value: `<@${application.reviewerDiscordId}>`, inline: false });
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(`Thornvale Wave Application — ${statusLabels[status] || status}`)
+    .setColor(statusColors[status] || 0x95a5a6)
+    .addFields(fields)
+    .setFooter({ text: `Thornvale Wave • ${session.id} • Application ${application.id}` })
+    .setTimestamp(new Date(application.updatedAt || application.createdAt || Date.now()));
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`${REVIEW_PREFIX}accept|${application.id}`)
+      .setLabel("Accept Application")
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(!actionable),
+    new ButtonBuilder()
+      .setCustomId(`${REVIEW_PREFIX}deny|${application.id}`)
+      .setLabel("Deny Application")
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(!actionable)
+  );
+
+  return { embeds: [embed], components: [row], allowedMentions: { parse: [] } };
+}
+
 function createWaveService({
   client,
   store,
   verificationService,
-  robloxGroupService,
-  onAcceptedMember,
+  robloxGroupUrl = "",
+  canReviewInteraction = async () => false,
   logger = console,
 }) {
-  if (!client || !store || !verificationService || !robloxGroupService) {
-    throw new TypeError("client, store, verificationService, and robloxGroupService are required");
+  if (!client || !store || !verificationService) {
+    throw new TypeError("client, store, and verificationService are required");
   }
 
   const timers = new Map();
@@ -223,27 +277,69 @@ function createWaveService({
     return session;
   }
 
-  async function sendReview(session, interaction, application, verification, outcome) {
+  async function createApplicantThread(session, application) {
     try {
-      const channel = await client.channels.fetch(session.reviewChannelId);
-      if (!channel || typeof channel.send !== "function") return;
-      const accepted = outcome.status === "accepted";
-      const embed = new EmbedBuilder()
-        .setTitle(`Thornvale Wave Application — ${accepted ? "Accepted" : "Needs Attention"}`)
-        .setColor(accepted ? 0x2ecc71 : 0xe67e22)
-        .addFields(
-          { name: "Applicant", value: `<@${interaction.user.id}> (${interaction.user.id})`, inline: false },
-          { name: "Roblox", value: `${verification.robloxUsername} (${verification.robloxUserId})`, inline: false },
-          { name: "What makes you a good candidate?", value: application.candidateAnswer.slice(0, 1024), inline: false },
-          { name: "How did you find out about Thornvale?", value: application.discoveryAnswer.slice(0, 1024), inline: false },
-          { name: "Automation Result", value: outcome.message.slice(0, 1024), inline: false }
-        )
-        .setFooter({ text: `Thornvale Wave • ${session.id} • Application ${application.id}` })
-        .setTimestamp(new Date());
-      await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+      const channel = await client.channels.fetch(session.channelId);
+      if (channel?.type !== ChannelType.GuildText || typeof channel.threads?.create !== "function") {
+        return null;
+      }
+      const thread = await channel.threads.create({
+        name: `application-${application.robloxUsername}-${application.id.slice(-6)}`.slice(0, 100),
+        autoArchiveDuration: 1440,
+        type: ChannelType.PrivateThread,
+        invitable: false,
+        reason: `Private Thornvale wave result for ${application.id}`,
+      });
+      await thread.members.add(application.discordId);
+      const groupInstruction = robloxGroupUrl
+        ? ` Before access can be completed, [request to join the Roblox group](${robloxGroupUrl}). If staff accept your application, run \`/verifygroup\` afterward.`
+        : " Before access can be completed, request to join the Roblox group. If staff accept your application, run `/verifygroup` afterward.";
+      await thread.send({
+        content: `<@${application.discordId}> your Thornvale application was submitted and is waiting for staff review. Your result will be posted privately here.${groupInstruction}`,
+        allowedMentions: { users: [application.discordId] },
+      });
+      return thread;
     } catch (err) {
-      logger.error(`Wave ${session.id} review log failed:`, err);
+      logger.error(`Wave ${session.id} private applicant thread failed:`, err);
+      return null;
     }
+  }
+
+  async function notifyApplicant(application, content) {
+    if (application.applicantThreadId) {
+      try {
+        const thread = await client.channels.fetch(application.applicantThreadId);
+        if (thread?.archived && typeof thread.setArchived === "function") {
+          await thread.setArchived(false, "Posting Thornvale application result");
+        }
+        if (thread && typeof thread.send === "function") {
+          await thread.send({
+            content: `<@${application.discordId}> ${content}`,
+            allowedMentions: { users: [application.discordId] },
+          });
+          return "private thread";
+        }
+      } catch (err) {
+        logger.error(`Application ${application.id} private result notification failed:`, err);
+      }
+    }
+
+    try {
+      const user = await client.users?.fetch?.(application.discordId);
+      if (user && typeof user.send === "function") {
+        await user.send({ content });
+        return "DM";
+      }
+    } catch (err) {
+      logger.error(`Application ${application.id} DM result notification failed:`, err);
+    }
+    return null;
+  }
+
+  async function sendReview(session, application) {
+    const channel = await client.channels.fetch(session.reviewChannelId);
+    if (!channel || typeof channel.send !== "function") return null;
+    return channel.send(buildApplicationReviewPayload(session, application));
   }
 
   async function handleCommand(interaction) {
@@ -264,6 +360,11 @@ function createWaveService({
       const reviewChannel = interaction.options.getChannel("reviewchannel", true);
       if (!channel || typeof channel.send !== "function") {
         return interaction.editReply("The selected application channel cannot receive messages.");
+      }
+      if (channel.type !== ChannelType.GuildText) {
+        return interaction.editReply(
+          "Choose a standard text channel so each applicant can receive their result in a private thread."
+        );
       }
       if (!reviewChannel || typeof reviewChannel.send !== "function") {
         return interaction.editReply("The selected review channel cannot receive messages.");
@@ -329,9 +430,107 @@ function createWaveService({
     return interaction.editReply(`Thornvale wave ${session.id} closed.`);
   }
 
+  async function updateReviewMessage(interaction, session, application) {
+    if (!interaction.message || typeof interaction.message.edit !== "function") return;
+    await interaction.message.edit(buildApplicationReviewPayload(session, application));
+  }
+
+  async function handleReviewButton(interaction) {
+    const parts = interaction.customId.slice(REVIEW_PREFIX.length).split("|");
+    const decision = parts[0];
+    const applicationId = parts.slice(1).join("|");
+    await interaction.deferReply({ ephemeral: true });
+
+    if (!new Set(["accept", "deny"]).has(decision) || !applicationId) {
+      await interaction.editReply("That Thornvale application action is invalid.");
+      return true;
+    }
+    if (!await canReviewInteraction(interaction)) {
+      await interaction.editReply("You do not have permission to review Thornvale applications.");
+      return true;
+    }
+
+    const claimed = await store.claimApplication(applicationId, interaction.user.id);
+    if (!claimed.ok) {
+      const existingStatus = claimed.application?.status;
+      const statusText = existingStatus
+        ? `This application is already **${existingStatus}**.`
+        : "This application could not be found.";
+      await interaction.editReply(statusText);
+      return true;
+    }
+
+    let application = claimed.application;
+    const session = await store.getSession(application.waveId) || { id: application.waveId };
+
+    if (decision === "deny") {
+      application = await store.updateApplicationStatus(
+        application.id,
+        "denied",
+        "Denied by Thornvale staff.",
+        interaction.user.id
+      );
+      await updateReviewMessage(interaction, session, application).catch((err) => {
+        logger.error(`Application ${application.id} review message update failed:`, err);
+      });
+      const deliveredBy = await notifyApplicant(
+        application,
+        "Your Thornvale application was denied by staff."
+      );
+      await interaction.editReply(
+        `Application ${application.id} denied.${deliveredBy ? ` The applicant was notified by ${deliveredBy}.` : " The applicant could not be notified."}`
+      );
+      return true;
+    }
+
+    try {
+      const verification = await verificationService.lookup({ discordId: application.discordId });
+      if (!verification.verified || String(verification.robloxUserId) !== application.robloxUserId) {
+        throw new Error("The applicant's Roblox verification no longer matches this application.");
+      }
+
+      application = await store.updateApplicationStatus(
+        application.id,
+        "accepted",
+        "Accepted by Thornvale staff. Applicant must complete Roblox group access with /verifygroup.",
+        interaction.user.id
+      );
+      await updateReviewMessage(interaction, session, application).catch((err) => {
+        logger.error(`Application ${application.id} review message update failed:`, err);
+      });
+      const deliveredBy = await notifyApplicant(
+        application,
+        robloxGroupUrl
+          ? `Your Thornvale application was accepted. [Request to join the Roblox group](${robloxGroupUrl}), then run \`/verifygroup\` to complete access.`
+          : "Your Thornvale application was accepted. Request to join the Roblox group, then run `/verifygroup` to complete access."
+      );
+      await interaction.editReply(
+        `Application ${application.id} accepted.${deliveredBy ? ` The applicant was notified by ${deliveredBy}.` : " The applicant could not be notified."}`
+      );
+    } catch (err) {
+      const detail = String(err?.message || err).slice(0, 800);
+      logger.error(`Application ${application.id} acceptance failed:`, err);
+      application = await store.updateApplicationStatus(
+        application.id,
+        "pending",
+        `Acceptance attempt failed: ${detail}`,
+        null
+      );
+      await updateReviewMessage(interaction, session, application).catch(() => {});
+      await interaction.editReply(
+        `Could not accept application ${application.id}: ${detail}. It remains pending so staff can retry or deny it.`
+      );
+    }
+    return true;
+  }
+
   async function handleButton(interaction) {
-    if (!String(interaction.customId || "").startsWith(APPLY_PREFIX)) return false;
-    const waveId = interaction.customId.slice(APPLY_PREFIX.length);
+    const customId = String(interaction.customId || "");
+    if (customId.startsWith(REVIEW_PREFIX)) {
+      return handleReviewButton(interaction);
+    }
+    if (!customId.startsWith(APPLY_PREFIX)) return false;
+    const waveId = customId.slice(APPLY_PREFIX.length);
     let session = await store.getSession(waveId);
     session = await reconcileSession(session);
     if (!session || session.status !== "open") {
@@ -402,45 +601,41 @@ function createWaveService({
     await editSessionMessage(session);
     if (session.status !== "open") clearTimer(session.id);
 
-    let outcome;
-    try {
-      await robloxGroupService.acceptJoinRequest(verification.robloxUserId);
-      let roleWarning = "";
-      if (typeof onAcceptedMember === "function") {
-        try {
-          const guild = interaction.guild || await client.guilds.fetch(session.guildId);
-          const member = await guild.members.fetch(interaction.user.id);
-          await onAcceptedMember(member, verification);
-        } catch (err) {
-          logger.error(`Wave ${session.id} role update failed:`, err);
-          roleWarning = " Roblox accepted the request, but staff should check the applicant's Discord roles.";
-        }
-      }
-      outcome = {
-        status: "accepted",
-        message: `Roblox join request accepted.${roleWarning}`,
-      };
-    } catch (err) {
-      logger.error(`Wave ${session.id} Roblox acceptance failed:`, err);
-      outcome = {
-        status: "failed",
-        message: `Automatic Roblox acceptance failed: ${String(err?.message || err).slice(0, 800)}`,
-      };
-    }
-
-    await store.updateApplicationStatus(application.id, outcome.status, outcome.message);
-    await sendReview(session, interaction, application, verification, outcome);
-
-    if (outcome.status === "accepted") {
-      await interaction.user.send(
-        "Your Thornvale wave application was accepted. Welcome to Thornvale!"
-      ).catch(() => {});
-      await interaction.editReply("Your application was accepted. Welcome to Thornvale!");
+    let pendingApplication = reserved.application;
+    const applicantThread = await createApplicantThread(session, pendingApplication);
+    if (applicantThread) {
+      pendingApplication = await store.updateApplicationContext(pendingApplication.id, {
+        applicantThreadId: applicantThread.id,
+      });
     } else {
-      await interaction.editReply(
-        "Your application was recorded, but automatic group acceptance needs staff attention. Staff have been notified."
-      );
+      const groupInstruction = robloxGroupUrl
+        ? ` Request to join the Roblox group: ${robloxGroupUrl}. If staff accept your application, run \`/verifygroup\` afterward.`
+        : " Request to join the Roblox group. If staff accept your application, run `/verifygroup` afterward.";
+      await interaction.user.send({
+        content: `Your Thornvale application was submitted and is waiting for staff review. Your result will be sent privately here.${groupInstruction}`,
+      }).catch(() => {});
     }
+
+    try {
+      await sendReview(session, pendingApplication);
+    } catch (err) {
+      logger.error(`Wave ${session.id} review queue delivery failed:`, err);
+      await store.updateApplicationStatus(
+        pendingApplication.id,
+        "pending",
+        `Review queue delivery failed: ${String(err?.message || err).slice(0, 500)}`
+      );
+      await interaction.editReply(
+        "Your application was saved, but the staff review message could not be posted. Please contact Thornvale staff with your application ID: "
+        + `\`${pendingApplication.id}\`.`
+      );
+      return true;
+    }
+
+    const privateLocation = applicantThread ? ` You can follow its private status in <#${applicantThread.id}>.` : "";
+    await interaction.editReply(
+      `Your Thornvale application was submitted for staff review.${privateLocation}`
+    );
     return true;
   }
 
@@ -463,6 +658,7 @@ function createWaveService({
 }
 
 module.exports = {
+  buildApplicationReviewPayload,
   buildWavePayload,
   createWaveService,
   isMatchingVerification,

@@ -41,6 +41,11 @@ function parseChannelIdInput(value) {
   return mentionMatch?.[1] ?? null;
 }
 
+function parseDiscordIdList(value) {
+  const matches = String(value ?? "").match(/\d{15,22}/g) || [];
+  return Array.from(new Set(matches));
+}
+
 function parseEditableMessageReference(value) {
   if (typeof value !== "string") {
     return null;
@@ -66,6 +71,7 @@ module.exports = {
   buildDiscordMessageUrl,
   formatOptionalString,
   parseChannelIdInput,
+  parseDiscordIdList,
   parseEditableMessageReference,
   parsePositiveInteger,
   parseTimestamp,

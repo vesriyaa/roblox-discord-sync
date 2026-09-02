@@ -215,6 +215,12 @@ function createMemoryStore() {
       }
       return existing || null;
     },
+    async deleteAllVerifications() {
+      const records = Array.from(linksByDiscord.values()).map((record) => ({ ...record }));
+      linksByDiscord.clear();
+      linksByRoblox.clear();
+      return records;
+    },
   };
 }
 
@@ -448,6 +454,10 @@ function createPostgresStore() {
         [String(discordId)]
       );
       return normalizeLink(result.rows[0]);
+    },
+    async deleteAllVerifications() {
+      const result = await query("DELETE FROM roblox_discord_links RETURNING *");
+      return result.rows.map(normalizeLink);
     },
   };
 }
