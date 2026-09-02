@@ -1,4 +1,4 @@
-const { SlashCommandBuilder } = require("discord.js");
+const { ChannelType, SlashCommandBuilder } = require("discord.js");
 
 function buildSlashCommands() {
   return [
@@ -191,6 +191,61 @@ function buildSlashCommands() {
         option.setName("eventid")
           .setDescription("Event ID from Studio")
           .setRequired(true)
+      ),
+
+    new SlashCommandBuilder()
+      .setName("wave")
+      .setDescription("Manage Thornvale application waves")
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("start")
+          .setDescription("Open a timed Thornvale application wave")
+          .addIntegerOption((option) =>
+            option.setName("duration")
+              .setDescription("How many minutes the wave stays open")
+              .setMinValue(1)
+              .setMaxValue(10080)
+              .setRequired(true)
+          )
+          .addIntegerOption((option) =>
+            option.setName("limit")
+              .setDescription("Maximum applications accepted by this wave")
+              .setMinValue(1)
+              .setMaxValue(500)
+              .setRequired(true)
+          )
+          .addChannelOption((option) =>
+            option.setName("reviewchannel")
+              .setDescription("Private channel where completed applications are logged")
+              .addChannelTypes(ChannelType.GuildText)
+              .setRequired(true)
+          )
+          .addChannelOption((option) =>
+            option.setName("channel")
+              .setDescription("Channel for the public wave panel (defaults to this channel)")
+              .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+              .setRequired(false)
+          )
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("status")
+          .setDescription("Show the active or selected wave status")
+          .addStringOption((option) =>
+            option.setName("waveid")
+              .setDescription("Optional Thornvale wave ID")
+              .setRequired(false)
+          )
+      )
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("close")
+          .setDescription("Close the active or selected wave")
+          .addStringOption((option) =>
+            option.setName("waveid")
+              .setDescription("Optional Thornvale wave ID")
+              .setRequired(false)
+          )
       ),
 
     new SlashCommandBuilder()

@@ -88,6 +88,9 @@ const { createGameApiRouter, isAuthorizedRequest } = require("./src/gameApi");
 const { createGameApiDocsHtml, createGameApiOpenApiSpec } = require("./src/gameApiDocs");
 const { createUserActionService } = require("./src/userActionService");
 const { createWebhookService } = require("./src/webhookService");
+const { createRobloxGroupService } = require("./src/robloxGroupService");
+const { createWaveStore } = require("./src/waveStore");
+const { createWaveService } = require("./src/waveService");
 
 const app = express();
 app.use(express.json());
@@ -104,6 +107,18 @@ const client = new Client({
 });
 
 const verificationService = createVerificationService({ verificationDb });
+const robloxGroupService = createRobloxGroupService({
+  groupId: GROUP_ID,
+  cookie: process.env.ROBLOX_COOKIE,
+});
+const waveStore = createWaveStore();
+const waveService = createWaveService({
+  client,
+  store: waveStore,
+  verificationService,
+  robloxGroupService,
+  onAcceptedMember: updateGroupAcceptRoles,
+});
 const userActionService = createUserActionService({
   client,
   verificationService,
@@ -143,6 +158,7 @@ const EAGER_DEFERRED_COMMANDS = new Set([
   "unlink",
   "dm",
   "groupaccept",
+  "wave",
   "inactive-check",
   "wipe",
   "unwipe",
@@ -2431,6 +2447,12 @@ client.once("clientReady", async () => {
   }
 
   try {
+    await waveService.init();
+  } catch (err) {
+    console.error("Wave system failed to initialize:", err);
+  }
+
+  try {
     await spreadsheetPermissionService.refreshNow();
     const permissionSheetError = spreadsheetPermissionService.getLastError?.();
     if (permissionSheetError) {
@@ -2461,6 +2483,11 @@ client.once("clientReady", async () => {
 client.on("interactionCreate", async (interaction) => {
   try {
   if (interaction.isModalSubmit()) {
+    const waveHandled = await waveService.handleModal(interaction);
+    if (waveHandled) {
+      return;
+    }
+
     const handled = await handleEditablePostModalSubmit({
       interaction,
       client,
@@ -2473,6 +2500,11 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (interaction.isButton()) {
+    const waveHandled = await waveService.handleButton(interaction);
+    if (waveHandled) {
+      return;
+    }
+
     if (interaction.customId === "verification|begin") {
       const { member } = await getInteractionMember(interaction);
       return sendVerificationAppLink(interaction, member);
@@ -2563,6 +2595,13 @@ client.on("interactionCreate", async (interaction) => {
       content: "✅ Your roles sync from your in-game team. If a team role is missing, join the game and let it refresh your team once.",
       ephemeral: true
     });
+  }
+
+  if (interaction.commandName === "wave") {
+    if (!await ensureAdminPermission(interaction, member, "wave")) {
+      return;
+    }
+    return waveService.handleCommand(interaction);
   }
 
   // ===============================
@@ -2666,32 +2705,7 @@ client.on("interactionCreate", async (interaction) => {
 
     try {
       await ensureEphemeralDefer(interaction);
-
-      const csrfResponse = await fetch("https://auth.roblox.com/v2/logout", {
-        method: "POST",
-        headers: {
-          "Cookie": `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`
-        }
-      });
-
-      const csrfToken = csrfResponse.headers.get("x-csrf-token");
-
-      const acceptResponse = await fetch(
-        `https://groups.roblox.com/v1/groups/${GROUP_ID}/join-requests/users/${robloxId}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Cookie": `.ROBLOSECURITY=${process.env.ROBLOX_COOKIE}`,
-            "x-csrf-token": csrfToken
-          }
-        }
-      );
-
-      if (!acceptResponse.ok) {
-        const errorText = await acceptResponse.text();
-        return sendInteractionResponse(interaction, `❌ Accept failed:\n${errorText}`);
-      }
+      await robloxGroupService.acceptJoinRequest(robloxId);
 
       try {
         await updateGroupAcceptRoles(targetMember);
@@ -2709,7 +2723,10 @@ client.on("interactionCreate", async (interaction) => {
 
     } catch (err) {
       console.error("Accept error:", err);
-      return sendInteractionResponse(interaction, "❌ Unexpected error occurred.");
+      return sendInteractionResponse(
+        interaction,
+        `❌ Accept failed: ${String(err?.message || "Unexpected error occurred.").slice(0, 1500)}`
+      );
     }
   }
 
@@ -4777,15 +4794,15 @@ app.get("/privacy", (req, res) => {
       },
       {
         heading: "Information We Collect",
-        body: "<ul><li>Discord data: user ID, username, display name, and avatar when available.</li><li>Roblox data: user ID, username, display name, and OAuth verification result.</li><li>Verification data: linked account IDs, verification timestamps, role-sync state, and last in-game activity timestamps.</li></ul><p>We do not collect passwords or payment information.</p>",
+        body: "<ul><li>Discord data: user ID, username, display name, and avatar when available.</li><li>Roblox data: user ID, username, display name, and OAuth verification result.</li><li>Verification data: linked account IDs, verification timestamps, role-sync state, and last in-game activity timestamps.</li><li>Wave application data: application answers, submission status, and the linked Discord and Roblox account IDs.</li></ul><p>We do not collect passwords or payment information.</p>",
       },
       {
         heading: "How We Use Your Data",
-        body: "<p>We use linked account information to apply verified roles, support account recovery, manage role sync, assist moderation, and connect Roblox game systems with the Thornvale Discord community.</p>",
+        body: "<p>We use linked account information to apply verified roles, process Thornvale wave applications, support account recovery, manage role sync, assist moderation, and connect Roblox game systems with the Thornvale Discord community.</p>",
       },
       {
         heading: "Data Retention",
-        body: "<p>We retain verification records while your account remains linked or while they are needed for Thornvale moderation, security, or game functionality. You may request unlinking through Thornvale staff.</p>",
+        body: "<p>We retain verification and wave application records while they are needed for Thornvale access, moderation, security, or game functionality. You may request unlinking or deletion through Thornvale staff, subject to records that must be retained for safety or moderation.</p>",
       },
       {
         heading: "Data Security",
