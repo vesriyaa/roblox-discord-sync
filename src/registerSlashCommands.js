@@ -200,11 +200,10 @@ function buildSlashCommands() {
         subcommand
           .setName("start")
           .setDescription("Open a timed Thornvale application wave")
-          .addIntegerOption((option) =>
+          .addStringOption((option) =>
             option.setName("duration")
-              .setDescription("How many minutes the wave stays open")
-              .setMinValue(1)
-              .setMaxValue(10080)
+              .setDescription("Duration: 30m, 1h, 1d, 1h30m, or plain minutes (max 7d)")
+              .setMaxLength(32)
               .setRequired(true)
           )
           .addIntegerOption((option) =>

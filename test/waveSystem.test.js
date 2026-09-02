@@ -6,6 +6,7 @@ const {
   buildWavePayload,
   createWaveService,
   isMatchingVerification,
+  parseWaveDuration,
   parseRobloxIdentity,
 } = require("../src/waveService");
 const { createMemoryStore } = require("../src/waveStore");
@@ -40,6 +41,19 @@ test("wave application identity must match the OAuth verification", () => {
     robloxUsername: "SomeoneElse",
     robloxUserId: "123456",
   }), false);
+});
+
+test("wave durations accept shorthand, compounds, and legacy minute values", () => {
+  assert.equal(parseWaveDuration("30m"), 30 * 60_000);
+  assert.equal(parseWaveDuration("1h"), 60 * 60_000);
+  assert.equal(parseWaveDuration("1d"), 24 * 60 * 60_000);
+  assert.equal(parseWaveDuration("1h30m"), 90 * 60_000);
+  assert.equal(parseWaveDuration("1d 12h"), 36 * 60 * 60_000);
+  assert.equal(parseWaveDuration("90"), 90 * 60_000);
+  assert.equal(parseWaveDuration("1w"), 7 * 24 * 60 * 60_000);
+  assert.equal(parseWaveDuration("30s"), null);
+  assert.equal(parseWaveDuration("8d"), null);
+  assert.equal(parseWaveDuration("tomorrow"), null);
 });
 
 test("wave store prevents duplicate applications and closes at capacity", async () => {
@@ -180,4 +194,7 @@ test("slash command registration includes the wave workflow", async () => {
   const wave = commands.map((command) => command.toJSON()).find((command) => command.name === "wave");
   assert.ok(wave);
   assert.deepEqual(wave.options.map((option) => option.name), ["start", "status", "close"]);
+  const duration = wave.options[0].options.find((option) => option.name === "duration");
+  assert.equal(duration.type, 3);
+  assert.match(duration.description, /1h/);
 });
