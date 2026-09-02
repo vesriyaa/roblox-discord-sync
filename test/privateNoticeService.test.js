@@ -2,34 +2,21 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createPrivateNoticeService } = require("../src/privateNoticeService");
 
-test("access notices use a locked, archived private thread", async () => {
-  const events = [];
-  const thread = {
-    id: "notice-thread",
-    members: { async add(id) { events.push(["member", id]); } },
-    async send(payload) { events.push(["message", payload.content]); },
-    async setLocked(value) { events.push(["locked", value]); },
-    async setArchived(value) { events.push(["archived", value]); },
-  };
-  const channel = {
-    type: 0,
-    threads: {
-      async create(options) {
-        events.push(["created", options.type]);
-        return thread;
-      },
-    },
-  };
+test("access notices are delivered by DM without creating a thread", async () => {
+  let directMessage;
   const service = createPrivateNoticeService({ client: {} });
   const result = await service.sendAccessNotice({
-    channel,
-    member: { id: "discord", user: { username: "Applicant" } },
+    member: {
+      id: "discord",
+      user: {
+        async send(payload) { directMessage = payload.content; },
+      },
+    },
     kind: "unwaved",
   });
 
-  assert.deepEqual(result, { deliveredBy: "private thread", threadId: "notice-thread" });
-  assert.deepEqual(events.map(([event]) => event), ["created", "member", "message", "locked", "archived"]);
-  assert.match(events[2][1], /only the \*\*Wald\*\*/);
+  assert.deepEqual(result, { deliveredBy: "DM", threadId: null });
+  assert.match(directMessage, /only the \*\*Wald\*\*/);
 });
 
 test("successful group verification closes the existing application thread", async () => {

@@ -1,13 +1,3 @@
-const { ChannelType } = require("discord.js");
-
-function sanitizeThreadName(value) {
-  return String(value || "member")
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 60) || "member";
-}
-
 function createPrivateNoticeService({ client, logger = console }) {
   if (!client) {
     throw new TypeError("client is required");
@@ -28,51 +18,7 @@ function createPrivateNoticeService({ client, logger = console }) {
     }
   }
 
-  async function createClosedPrivateThread({ channel, member, title, content }) {
-    if (
-      !channel
-      || channel.type !== ChannelType.GuildText
-      || typeof channel.threads?.create !== "function"
-    ) {
-      return null;
-    }
-
-    let thread = null;
-    try {
-      thread = await channel.threads.create({
-        name: `${sanitizeThreadName(title)}-${sanitizeThreadName(member.user?.username || member.id)}`.slice(0, 100),
-        autoArchiveDuration: 1440,
-        type: ChannelType.PrivateThread,
-        invitable: false,
-        reason: `Private Thornvale access notice for ${member.id}`,
-      });
-      await thread.members.add(member.id);
-      await thread.send({
-        content: `<@${member.id}> ${content}\n\n*This is a private Thornvale notice visible only to you and authorized staff.*`,
-        allowedMentions: { users: [member.id] },
-      });
-
-      if (typeof thread.setLocked === "function") {
-        await thread.setLocked(true, "Thornvale access notice delivered").catch((err) => {
-          logger.warn(`Could not lock private notice thread ${thread.id}:`, err?.message || err);
-        });
-      }
-      if (typeof thread.setArchived === "function") {
-        await thread.setArchived(true, "Thornvale access notice delivered").catch((err) => {
-          logger.warn(`Could not archive private notice thread ${thread.id}:`, err?.message || err);
-        });
-      }
-      return { deliveredBy: "private thread", threadId: thread.id };
-    } catch (err) {
-      logger.error(`Private notice thread failed for ${member.id}:`, err);
-      if (thread && typeof thread.setArchived === "function") {
-        await thread.setArchived(true, "Private notice setup failed").catch(() => {});
-      }
-      return null;
-    }
-  }
-
-  async function sendAccessNotice({ channel, member, kind }) {
+  async function sendAccessNotice({ member, kind }) {
     const messages = {
       unwaved: "You have been unwaved from Thornvale. Your removable Discord roles were cleared and only the **Wald** access role was retained.",
       unverified: "You have been unverified from Thornvale. Your verification link and Verified/game roles were removed.",
@@ -81,13 +27,6 @@ function createPrivateNoticeService({ client, logger = console }) {
     const content = messages[kind];
     if (!content) throw new TypeError(`Unknown access notice kind: ${kind}`);
 
-    const threadResult = await createClosedPrivateThread({
-      channel,
-      member,
-      title: `thornvale-${kind}-notice`,
-      content,
-    });
-    if (threadResult) return threadResult;
     return sendDm(member, content);
   }
 
@@ -129,5 +68,4 @@ function createPrivateNoticeService({ client, logger = console }) {
 
 module.exports = {
   createPrivateNoticeService,
-  sanitizeThreadName,
 };

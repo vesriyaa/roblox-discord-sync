@@ -4,7 +4,6 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ChannelType,
   Client,
   EmbedBuilder,
   GatewayIntentBits,
@@ -16,6 +15,7 @@ const {
   normalizeCommandKey,
 } = require("./staffCommandMatrix");
 const {
+  ACCESS_MANAGEMENT_CHANNEL_ID,
   ADMIN_ACTION_CLAIM_TIMEOUT_MS,
   ADMIN_ACTION_RETENTION_MS,
   ADMIN_ACTION_WAIT_TIMEOUT_MS,
@@ -94,6 +94,7 @@ const { createRobloxGroupService } = require("./src/robloxGroupService");
 const { createBulkAccessService } = require("./src/bulkAccessService");
 const { createGroupAccessService } = require("./src/groupAccessService");
 const { createPrivateNoticeService } = require("./src/privateNoticeService");
+const { isAccessManagementChannel } = require("./src/accessManagementPolicy");
 const { createWaveStore } = require("./src/waveStore");
 const { createWaveService } = require("./src/waveService");
 
@@ -511,6 +512,18 @@ function createRandomToken(byteLength = 32) {
 
 function createCodeChallenge(codeVerifier) {
   return base64Url(crypto.createHash("sha256").update(codeVerifier).digest());
+}
+
+async function ensureAccessManagementChannel(interaction) {
+  if (isAccessManagementChannel(interaction.channelId, ACCESS_MANAGEMENT_CHANNEL_ID)) {
+    return true;
+  }
+
+  await sendInteractionResponse(
+    interaction,
+    `Use this access-management command in <#${ACCESS_MANAGEMENT_CHANNEL_ID}>. Nothing was changed.`
+  );
+  return false;
 }
 
 function escapeHtml(value) {
@@ -2388,7 +2401,9 @@ async function handleInactiveCheckCommand(interaction, guild) {
     return sendInteractionResponse(interaction, "Unknown inactive-check action.");
   }
 
-  const notificationChannel = interaction.options.getChannel("notificationchannel", true);
+  if (!await ensureAccessManagementChannel(interaction)) {
+    return;
+  }
 
   const records = await verificationDb.listInactiveCandidates(inactiveCutoffIso, limit);
   if (records.length === 0) {
@@ -2411,7 +2426,6 @@ async function handleInactiveCheckCommand(interaction, guild) {
       if (targetMember) {
         await applyInactiveDiscordRoles(targetMember);
         await privateNoticeService.sendAccessNotice({
-          channel: notificationChannel,
           member: targetMember,
           kind: "inactive",
         });
@@ -2692,6 +2706,9 @@ client.on("interactionCreate", async (interaction) => {
     if (!await ensureAdminPermission(interaction, member, commandName)) {
       return;
     }
+    if (!await ensureAccessManagementChannel(interaction)) {
+      return;
+    }
 
     const expectedConfirmation = commandName === "unwave-all" ? "UNWAVE ALL" : "UNVERIFY ALL";
     const confirmation = String(interaction.options.getString("confirmation", true) || "")
@@ -2706,14 +2723,12 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     try {
-      const notificationChannel = interaction.options.getChannel("notificationchannel", true);
       const notifyKind = commandName === "unwave-all" ? "unwaved" : "unverified";
       const result = commandName === "unwave-all"
         ? await bulkAccessService.unwaveEveryone(guild, {
           exemptRoleIds: parseDiscordIdList(interaction.options.getString("exemptroles")),
           onMemberUpdated(targetMember) {
             return privateNoticeService.sendAccessNotice({
-              channel: notificationChannel,
               member: targetMember,
               kind: notifyKind,
             });
@@ -2722,7 +2737,6 @@ client.on("interactionCreate", async (interaction) => {
         : await bulkAccessService.unverifyEveryone(guild, {
           onMemberUpdated(targetMember) {
             return privateNoticeService.sendAccessNotice({
-              channel: notificationChannel,
               member: targetMember,
               kind: notifyKind,
             });
@@ -2733,8 +2747,8 @@ client.on("interactionCreate", async (interaction) => {
         `Targeted members: ${result.targeted}`,
         `Updated members: ${result.updated}`,
         `Failed members: ${result.failures.length}`,
-        `Private notices delivered: ${result.notificationsDelivered}`,
-        `Private notices failed: ${result.notificationFailures.length}`,
+        `DM notices delivered: ${result.notificationsDelivered}`,
+        `DM notices failed: ${result.notificationFailures.length}`,
       ];
       if (commandName === "unwave-all") {
         lines.push(`Skipped exempt members: ${result.skippedExempt}`);
@@ -2778,18 +2792,12 @@ client.on("interactionCreate", async (interaction) => {
     if (!await ensureAdminPermission(interaction, member, "unlink", "❌ You do not have permission to use this command.")) {
       return;
     }
-  }
-
-  if (interaction.commandName === "unlink") {
-
-    if (!await ensureAdminPermission(interaction, member, "unlink", "❌ You do not have permission to use this command.")) {
+    if (!await ensureAccessManagementChannel(interaction)) {
       return;
     }
 
     const targetUser = interaction.options.getUser("user");
     const targetMember = await guild.members.fetch(targetUser.id);
-    const notificationChannel = interaction.options.getChannel("notificationchannel")
-      || (interaction.channel?.type === ChannelType.GuildText ? interaction.channel : null);
 
     try {
       await ensureEphemeralDefer(interaction);
@@ -2808,7 +2816,6 @@ client.on("interactionCreate", async (interaction) => {
       await verificationDb.deleteVerificationByDiscordId(targetUser.id);
 
       const notice = await privateNoticeService.sendAccessNotice({
-        channel: notificationChannel,
         member: targetMember,
         kind: "unverified",
       });
