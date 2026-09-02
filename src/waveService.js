@@ -14,9 +14,43 @@ const WAVE_COLOR = 0x2fb8df;
 const CLOSED_COLOR = 0xe74c3c;
 const APPLY_PREFIX = "wave|apply|";
 const SUBMIT_PREFIX = "wave|submit|";
+const MIN_WAVE_DURATION_MS = 60_000;
+const MAX_WAVE_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
+const DURATION_UNIT_MS = Object.freeze({
+  s: 1000,
+  m: 60_000,
+  h: 60 * 60_000,
+  d: 24 * 60 * 60_000,
+  w: 7 * 24 * 60 * 60_000,
+});
 
 function createWaveId() {
   return `TV-WAVE-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+}
+
+function parseWaveDuration(value) {
+  const input = String(value ?? "").trim().toLowerCase();
+  if (!input) return null;
+
+  let durationMs = 0;
+  if (/^\d+$/.test(input)) {
+    durationMs = Number(input) * DURATION_UNIT_MS.m;
+  } else {
+    const compact = input.replace(/\s+/g, "");
+    const componentPattern = /(\d+)([wdhms])/g;
+    let cursor = 0;
+    let match;
+    while ((match = componentPattern.exec(compact)) !== null) {
+      if (match.index !== cursor) return null;
+      durationMs += Number(match[1]) * DURATION_UNIT_MS[match[2]];
+      cursor = componentPattern.lastIndex;
+    }
+    if (cursor !== compact.length) return null;
+  }
+
+  if (!Number.isSafeInteger(durationMs)) return null;
+  if (durationMs < MIN_WAVE_DURATION_MS || durationMs > MAX_WAVE_DURATION_MS) return null;
+  return durationMs;
 }
 
 function parseRobloxIdentity(value) {
@@ -235,7 +269,13 @@ function createWaveService({
         return interaction.editReply("The selected review channel cannot receive messages.");
       }
 
-      const durationMinutes = interaction.options.getInteger("duration", true);
+      const durationInput = interaction.options.getString("duration", true);
+      const durationMs = parseWaveDuration(durationInput);
+      if (durationMs === null) {
+        return interaction.editReply(
+          "Enter a duration from 1 minute to 7 days, such as `30m`, `1h`, `1d`, or `1h30m`. Plain numbers are treated as minutes."
+        );
+      }
       const applicationLimit = interaction.options.getInteger("limit", true);
       const session = await store.createSession({
         id: createWaveId(),
@@ -244,7 +284,7 @@ function createWaveService({
         reviewChannelId: reviewChannel.id,
         createdByDiscordId: interaction.user.id,
         createdAt: new Date().toISOString(),
-        endsAt: new Date(Date.now() + durationMinutes * 60_000).toISOString(),
+        endsAt: new Date(Date.now() + durationMs).toISOString(),
         applicationLimit,
       });
 
@@ -426,5 +466,6 @@ module.exports = {
   buildWavePayload,
   createWaveService,
   isMatchingVerification,
+  parseWaveDuration,
   parseRobloxIdentity,
 };
