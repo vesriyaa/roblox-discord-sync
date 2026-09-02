@@ -26,7 +26,7 @@ function buildSlashCommands() {
 
     new SlashCommandBuilder()
       .setName("unwave-all")
-      .setDescription("Remove waved access from every currently waved member")
+      .setDescription("Remove waved access and Roblox group membership from waved members")
       .addStringOption((option) =>
         option.setName("confirmation")
           .setDescription("Type UNWAVE ALL to confirm")

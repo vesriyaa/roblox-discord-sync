@@ -29,6 +29,7 @@ function createBulkAccessService({
   defaultUnwaveExemptRoleIds = [],
   isUnwaveExemptMember = async () => false,
   onVerificationRemoved = async () => {},
+  robloxGroupService = null,
 }) {
   if (!verificationDb) {
     throw new TypeError("verificationDb is required");
@@ -44,6 +45,7 @@ function createBulkAccessService({
     exemptRoleIds = [],
     checkStaffExemption = false,
     replaceAllRoles = false,
+    removeFromRobloxGroup = false,
     onMemberUpdated = null,
   } = {}) {
     const fetched = await guild.members.fetch();
@@ -63,6 +65,10 @@ function createBulkAccessService({
     const notificationFailures = [];
     let updated = 0;
     let notificationsDelivered = 0;
+    let groupRemoved = 0;
+    let groupAlreadyAbsent = 0;
+    let groupUnlinked = 0;
+    const groupFailures = [];
 
     await runWithConcurrency(targets, 5, async (member) => {
       try {
@@ -78,6 +84,31 @@ function createBulkAccessService({
           }
         }
         updated += 1;
+        if (removeFromRobloxGroup) {
+          try {
+            const verification = typeof verificationDb.getVerificationByDiscordId === "function"
+              ? await verificationDb.getVerificationByDiscordId(member.id)
+              : null;
+            if (!verification?.robloxUserId) {
+              groupUnlinked += 1;
+            } else if (typeof robloxGroupService?.removeMember !== "function") {
+              groupFailures.push({
+                discordId: String(member.id),
+                robloxUserId: String(verification.robloxUserId),
+                message: "Roblox group removal is not configured.",
+              });
+            } else {
+              const groupResult = await robloxGroupService.removeMember(verification.robloxUserId);
+              if (groupResult?.alreadyAbsent) groupAlreadyAbsent += 1;
+              else groupRemoved += 1;
+            }
+          } catch (err) {
+            groupFailures.push({
+              discordId: String(member.id),
+              message: String(err?.message || err).slice(0, 300),
+            });
+          }
+        }
         if (typeof onMemberUpdated === "function") {
           try {
             const notification = await onMemberUpdated(member);
@@ -105,6 +136,10 @@ function createBulkAccessService({
       failures,
       notificationsDelivered,
       notificationFailures,
+      groupRemoved,
+      groupAlreadyAbsent,
+      groupUnlinked,
+      groupFailures,
     };
   }
 
@@ -115,6 +150,7 @@ function createBulkAccessService({
         exemptRoleIds: [...defaultExemptRoleIds, ...exemptRoleIds],
         checkStaffExemption: true,
         replaceAllRoles: true,
+        removeFromRobloxGroup: true,
         onMemberUpdated,
       });
     },

@@ -20,7 +20,7 @@ function createPrivateNoticeService({ client, logger = console }) {
 
   async function sendAccessNotice({ member, kind }) {
     const messages = {
-      unwaved: "You have been unwaved from Thornvale. Your removable Discord roles were cleared and only the **Wald** access role was retained.",
+      unwaved: "You have been unwaved from Thornvale. Your removable Discord roles were cleared, only the **Wald** access role was retained, and your Roblox group membership was removed if you were still in the group.",
       unverified: "You have been unverified from Thornvale. Your verification link and Verified/game roles were removed.",
       inactive: "You have been unwaved and unverified from Thornvale because no in-game activity was recorded before the configured cutoff. Your character data has also been queued for wipe.",
     };

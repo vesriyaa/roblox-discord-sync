@@ -156,6 +156,62 @@ test("Roblox group membership uses the public recommended roles endpoint", async
   assert.equal(membership.role.name, "Member");
 });
 
+test("Roblox group removal checks membership and uses the authenticated delete endpoint", async () => {
+  const requests = [];
+  const service = createRobloxGroupService({
+    groupId: "99",
+    cookie: "secret-cookie",
+    async fetchImpl(url, options) {
+      requests.push({ url, options });
+      if (url.includes("/v2/users/123456/groups/roles")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { data: [{ group: { id: 99 }, role: { id: 1, name: "Member" } }] };
+          },
+        };
+      }
+      if (url.includes("auth.roblox.com")) {
+        return { headers: { get: () => "csrf" } };
+      }
+      return { ok: true, status: 200, headers: { get: () => null } };
+    },
+  });
+
+  const result = await service.removeMember("123456");
+  assert.equal(result.removed, true);
+  assert.equal(result.alreadyAbsent, false);
+  assert.equal(requests.length, 3);
+  assert.equal(requests[2].url, "https://groups.roblox.com/v1/groups/99/users/123456");
+  assert.equal(requests[2].options.method, "DELETE");
+  assert.equal(requests[2].options.headers["x-csrf-token"], "csrf");
+});
+
+test("Roblox group removal treats an already absent user as a successful no-op", async () => {
+  const requests = [];
+  const service = createRobloxGroupService({
+    groupId: "99",
+    cookie: "",
+    async fetchImpl(url, options) {
+      requests.push({ url, options });
+      return {
+        ok: true,
+        status: 200,
+        async json() { return { data: [] }; },
+      };
+    },
+  });
+
+  const result = await service.removeMember("123456");
+  assert.deepEqual(result, {
+    removed: false,
+    alreadyAbsent: true,
+    robloxUserId: "123456",
+  });
+  assert.equal(requests.length, 1);
+});
+
 test("verified wave submissions wait for staff and approval points applicants to verifygroup", async () => {
   const activeSession = session({ applicationLimit: 5 });
   let reviewPayload;

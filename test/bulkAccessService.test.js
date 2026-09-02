@@ -38,14 +38,26 @@ test("unwave everyone strips a waved member down to Wald and notifies them", asy
   const verifiedOnly = member("verified", ["verified"]);
   const staff = member("staff", ["verified", "envisioned", "staff-role"]);
   const sheetStaff = member("sheet-staff", ["verified", "envisioned"]);
+  const removedFromGroup = [];
   const service = createBulkAccessService({
-    verificationDb: { async deleteAllVerifications() { return []; } },
+    verificationDb: {
+      async deleteAllVerifications() { return []; },
+      async getVerificationByDiscordId(discordId) {
+        return discordId === "waved" ? { robloxUserId: "123456" } : null;
+      },
+    },
     verifiedRoleId: "verified",
     envisionedRoleId: "envisioned",
     unwavedRoleId: "unwaved",
     teamRoleIds: ["team"],
     defaultUnwaveExemptRoleIds: ["staff-role"],
     async isUnwaveExemptMember(value) { return value.id === "sheet-staff"; },
+    robloxGroupService: {
+      async removeMember(robloxUserId) {
+        removedFromGroup.push(robloxUserId);
+        return { removed: true, alreadyAbsent: false };
+      },
+    },
   });
 
   const notified = [];
@@ -67,6 +79,48 @@ test("unwave everyone strips a waved member down to Wald and notifies them", asy
   assert.equal(sheetStaff.hasRole("envisioned"), true);
   assert.deepEqual(notified, ["waved"]);
   assert.equal(result.notificationsDelivered, 1);
+  assert.deepEqual(removedFromGroup, ["123456"]);
+  assert.equal(result.groupRemoved, 1);
+  assert.equal(result.groupAlreadyAbsent, 0);
+  assert.equal(result.groupUnlinked, 0);
+  assert.deepEqual(result.groupFailures, []);
+});
+
+test("unwave still completes when a Roblox member is absent or removal fails", async () => {
+  const absent = member("absent", ["verified", "envisioned"]);
+  const failed = member("failed", ["verified", "envisioned"]);
+  const notices = [];
+  const service = createBulkAccessService({
+    verificationDb: {
+      async getVerificationByDiscordId(discordId) {
+        return { robloxUserId: discordId === "absent" ? "111" : "222" };
+      },
+    },
+    envisionedRoleId: "envisioned",
+    unwavedRoleId: "unwaved",
+    robloxGroupService: {
+      async removeMember(robloxUserId) {
+        if (robloxUserId === "111") return { removed: false, alreadyAbsent: true };
+        throw new Error("Roblox temporarily unavailable");
+      },
+    },
+  });
+
+  const result = await service.unwaveEveryone(guildWithMembers([absent, failed]), {
+    async onMemberUpdated(value) {
+      notices.push(value.id);
+      return { deliveredBy: "dm" };
+    },
+  });
+
+  assert.equal(result.updated, 2);
+  assert.equal(absent.hasRole("unwaved"), true);
+  assert.equal(failed.hasRole("unwaved"), true);
+  assert.equal(result.groupAlreadyAbsent, 1);
+  assert.equal(result.groupRemoved, 0);
+  assert.equal(result.groupFailures.length, 1);
+  assert.equal(result.groupFailures[0].discordId, "failed");
+  assert.deepEqual(notices.sort(), ["absent", "failed"]);
 });
 
 test("unwave everyone accepts extra exempt roles for a single run", async () => {

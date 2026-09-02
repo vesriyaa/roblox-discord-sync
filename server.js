@@ -126,6 +126,7 @@ const bulkAccessService = createBulkAccessService({
   unwavedRoleId: UNWAVED_ROLE_ID,
   teamRoleIds: Object.values(roleMap),
   defaultUnwaveExemptRoleIds: Array.from(INACTIVITY_EXEMPT_ROLE_IDS),
+  robloxGroupService,
   isUnwaveExemptMember(member) {
     return hasAdminPermissions(member, "unlink");
   },
@@ -2752,6 +2753,10 @@ client.on("interactionCreate", async (interaction) => {
       ];
       if (commandName === "unwave-all") {
         lines.push(`Skipped exempt members: ${result.skippedExempt}`);
+        lines.push(`Removed from Roblox group: ${result.groupRemoved}`);
+        lines.push(`Already outside Roblox group: ${result.groupAlreadyAbsent}`);
+        lines.push(`No linked Roblox account: ${result.groupUnlinked}`);
+        lines.push(`Roblox group removal failures: ${result.groupFailures.length}`);
       }
       if (commandName === "unverify-all") {
         lines.push(`Verification links deleted: ${result.linksDeleted}`);
@@ -2761,6 +2766,13 @@ client.on("interactionCreate", async (interaction) => {
           "",
           "**Failures**",
           ...result.failures.slice(0, 10).map((failure) => `<@${failure.discordId}> — ${failure.message}`)
+        );
+      }
+      if (commandName === "unwave-all" && result.groupFailures.length > 0) {
+        lines.push(
+          "",
+          "**Roblox group removal failures**",
+          ...result.groupFailures.slice(0, 10).map((failure) => `<@${failure.discordId}> — ${failure.message}`)
         );
       }
       return sendInteractionResponse(interaction, trimDiscordMessage(lines));
