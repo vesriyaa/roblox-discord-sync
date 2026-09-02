@@ -83,6 +83,11 @@ const {
   parseTimestamp,
 } = require("./src/utils");
 const { createVerificationDatabase } = require("./src/verificationDatabase");
+const { createVerificationService } = require("./src/verificationService");
+const { createGameApiRouter, isAuthorizedRequest } = require("./src/gameApi");
+const { createGameApiDocsHtml, createGameApiOpenApiSpec } = require("./src/gameApiDocs");
+const { createUserActionService } = require("./src/userActionService");
+const { createWebhookService } = require("./src/webhookService");
 
 const app = express();
 app.use(express.json());
@@ -97,6 +102,31 @@ const client = new Client({
     GatewayIntentBits.DirectMessages
   ]
 });
+
+const verificationService = createVerificationService({ verificationDb });
+const userActionService = createUserActionService({
+  client,
+  verificationService,
+  defaultGuildId: GUILD_ID,
+  roleMap,
+});
+const webhookService = createWebhookService({
+  client,
+  resolveRelayChannelId: getRelayChannelId,
+  buildRelayPayload: buildRelayMessagePayload,
+  buildRelayComponents,
+});
+const gameApiSpec = createGameApiOpenApiSpec(PUBLIC_BASE_URL);
+
+app.get("/api/openapi.json", (req, res) => res.json(gameApiSpec));
+app.get("/docs", (req, res) => res.type("html").send(createGameApiDocsHtml()));
+app.use("/api/v1", createGameApiRouter({
+  apiKey: API_KEY,
+  verificationService,
+  userActionService,
+  webhookService,
+  onVerifiedJoin: refreshVerifiedRoleForLink,
+}));
 
 const ADMIN_SHEET_URL = process.env.ADMIN_SHEET_URL
   || process.env.GOOGLE_SHEETS_ADMIN_URL
@@ -316,6 +346,16 @@ async function ensureVerifiedRole(member) {
     // Verification is additive: roles assigned by Dyno or other systems must survive.
     await member.roles.add(VERIFIED_ROLE_ID);
   }
+}
+
+async function refreshVerifiedRoleForLink(record) {
+  if (!record?.discordId || !client.isReady()) {
+    return;
+  }
+
+  const guild = await client.guilds.fetch(GUILD_ID);
+  const member = await guild.members.fetch(record.discordId);
+  await ensureVerifiedRole(member);
 }
 
 async function safeSendDm(user, content) {
@@ -2511,27 +2551,6 @@ client.on("interactionCreate", async (interaction) => {
   // ===============================
   // GET ROLES
   // ===============================
-  if (interaction.commandName === "verify") {
-
-    if (member.roles.cache.has(VERIFIED_ROLE_ID)) {
-      return interaction.reply({
-        content: "❌ You are already verified. A moderator must unlink you first.",
-        ephemeral: true
-      });
-    }
-
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    verificationCodes.set(code, createVerificationRequest(interaction));
-
-    return interaction.reply({
-      content: `Your verification code is: **${code}**\nEnter this in-game.`,
-      ephemeral: true
-    });
-  }
-
-  // ===============================
-  // GET ROLES
-  // ===============================
   if (interaction.commandName === "getroles") {
     if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
       return interaction.reply({
@@ -2978,8 +2997,9 @@ app.get("/oauth/roblox/callback", async (req, res) => {
 });
 
 app.post("/verify", async (req, res) => {
-
-  if (req.headers["x-api-key"] !== API_KEY) {
+  res.set("Deprecation", "true");
+  res.set("Link", "</docs>; rel=\"deprecation\"");
+  if (!isAuthorizedRequest(req, API_KEY)) {
     return res.status(403).send("Unauthorized");
   }
 
@@ -3033,8 +3053,9 @@ app.post("/verify", async (req, res) => {
 });
 
 app.post("/checkUnlink", async (req, res) => {
-
-  if (req.headers["x-api-key"] !== API_KEY) {
+  res.set("Deprecation", "true");
+  res.set("Link", "</docs>; rel=\"deprecation\"");
+  if (!isAuthorizedRequest(req, API_KEY)) {
     return res.status(403).send("Unauthorized");
   }
 
@@ -3058,7 +3079,9 @@ app.post("/checkUnlink", async (req, res) => {
 });
 
 app.post("/verification/lookup", async (req, res) => {
-  if (req.headers["x-api-key"] !== API_KEY) {
+  res.set("Deprecation", "true");
+  res.set("Link", "</docs>; rel=\"deprecation\"");
+  if (!isAuthorizedRequest(req, API_KEY)) {
     return res.status(403).send("Unauthorized");
   }
 
@@ -3069,23 +3092,7 @@ app.post("/verification/lookup", async (req, res) => {
   }
 
   try {
-    const record = discordId
-      ? await verificationDb.getVerificationByDiscordId(discordId)
-      : await verificationDb.getVerificationByRobloxUserId(robloxUserId);
-
-    if (!record) {
-      return res.json({ verified: false });
-    }
-
-    return res.json({
-      verified: true,
-      discordId: record.discordId,
-      robloxUserId: record.robloxUserId,
-      robloxUsername: record.robloxUsername,
-      robloxDisplayName: record.robloxDisplayName,
-      verifiedAt: record.verifiedAt,
-      updatedAt: record.updatedAt,
-    });
+    return res.json(await verificationService.lookup({ discordId, robloxUserId }));
   } catch (err) {
     console.error("Verification lookup error:", err);
     return res.status(500).send("Verification lookup failed");
@@ -3093,7 +3100,9 @@ app.post("/verification/lookup", async (req, res) => {
 });
 
 app.post("/activity/game", async (req, res) => {
-  if (req.headers["x-api-key"] !== API_KEY) {
+  res.set("Deprecation", "true");
+  res.set("Link", "</docs>; rel=\"deprecation\"");
+  if (!isAuthorizedRequest(req, API_KEY)) {
     return res.status(403).send("Unauthorized");
   }
 
@@ -3102,24 +3111,16 @@ app.post("/activity/game", async (req, res) => {
     return res.status(400).send("Missing robloxUserId");
   }
 
-  const eventType = String(req.body?.eventType || req.body?.event || "seen").toLowerCase();
   try {
-    const record = await verificationDb.recordGameActivity({
-      robloxUserId,
-      eventType,
-      robloxUsername: typeof req.body?.robloxUsername === "string" ? req.body.robloxUsername : "",
-      robloxDisplayName: typeof req.body?.robloxDisplayName === "string" ? req.body.robloxDisplayName : "",
-    });
-
-    if (!record) {
+    const result = await verificationService.recordActivity(req.body);
+    const record = result.verification;
+    if (!record.verified) {
       return res.json({ ok: true, verified: false });
     }
 
-    if (eventType === "join" && client.isReady()) {
+    if (result.eventType === "join") {
       try {
-        const guild = await client.guilds.fetch(GUILD_ID);
-        const member = await guild.members.fetch(record.discordId);
-        await ensureVerifiedRole(member);
+        await refreshVerifiedRoleForLink(record);
       } catch (roleErr) {
         console.error("Game activity role refresh error:", roleErr);
       }
@@ -3139,101 +3140,53 @@ app.post("/activity/game", async (req, res) => {
 });
 
 app.post("/updateRole", async (req, res) => {
-
-  if (req.headers["x-api-key"] !== API_KEY) {
+  if (!isAuthorizedRequest(req, API_KEY)) {
     return res.status(403).send("Unauthorized");
   }
-
-  let { discordId, team } = req.body;
-  const robloxUserId = req.body?.robloxUserId ? String(req.body.robloxUserId) : "";
-  if (!discordId && robloxUserId) {
-    const verification = await verificationDb.getVerificationByRobloxUserId(robloxUserId);
-    discordId = verification?.discordId;
-  }
-
-  if (!discordId || !team) {
-    return res.status(400).send("Missing discordId/robloxUserId or team");
-  }
-
+  res.set("Deprecation", "true");
+  res.set("Link", "</api/v1/useraction>; rel=successor-version");
   try {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    const member = await guild.members.fetch(discordId);
-
-    const newRoleId = roleMap[team];
-    if (!newRoleId) {
-      return res.status(400).send("Invalid team");
+    const result = await userActionService.execute({ method: "SyncTeamRole", ...req.body });
+    if (result.skipped) {
+      return res.status(404).send("Roblox account is not verified");
     }
-
-    // Remove existing team roles
-    for (const roleId of Object.values(roleMap)) {
-      if (member.roles.cache.has(roleId)) {
-        await member.roles.remove(roleId);
-      }
-    }
-
-    // Add correct role
-    await member.roles.add(newRoleId);
-
-    res.send("Role updated");
-
+    return res.send("Role updated");
   } catch (err) {
     console.error("Role update error:", err);
-    res.status(500).send("Error assigning role");
+    return res.status(Number.isInteger(err?.status) ? err.status : 500).send(err?.message || "Error assigning role");
   }
 });
 
 app.post("/relayWebhook/:service", async (req, res) => {
-
-  if (req.headers["x-api-key"] !== API_KEY) {
+  if (!isAuthorizedRequest(req, API_KEY)) {
     return res.status(403).send("Unauthorized");
   }
-
-  if (!client.isReady()) {
-    return res.status(503).send("Bot not ready");
-  }
-
-  const service = String(req.params.service || "").toLowerCase();
-  const channelId = getRelayChannelId(service);
-  if (!channelId) {
-    return res.status(404).send("Unknown relay service");
-  }
-
-  const messagePayload = buildRelayMessagePayload(req.body || {});
-  const components = buildRelayComponents(service, req.body || {});
-  if (components.length > 0) {
-    messagePayload.components = components;
-  }
-
-  if (!messagePayload.content && (!Array.isArray(messagePayload.embeds) || messagePayload.embeds.length === 0)) {
-    return res.status(400).send("Missing relay message payload");
-  }
-
+  res.set("Deprecation", "true");
+  res.set("Link", "</api/v1/webhook>; rel=successor-version");
   try {
-    const channel = await client.channels.fetch(channelId);
-    if (!channel || typeof channel.send !== "function") {
-      return res.status(500).send("Relay channel unavailable");
-    }
-
-    const message = await channel.send(messagePayload);
-    res.json({
-      ok: true,
-      service,
-      channelId: message.channelId,
-      messageId: message.id,
+    const result = await webhookService.execute({
+      method: "Payload",
+      service: req.params.service,
+      payload: req.body || {},
     });
-
+    return res.json({
+      ok: true,
+      service: result.service,
+      channelId: result.channelId,
+      messageId: result.messageId,
+    });
   } catch (err) {
     console.error("Relay webhook error:", err);
-    res.status(500).json({
+    return res.status(Number.isInteger(err?.status) ? err.status : 500).json({
       ok: false,
-      error: "Error posting relay webhook",
+      error: err?.message || "Error posting relay webhook",
     });
   }
 });
 
 app.post("/commandBar/log", async (req, res) => {
 
-  if (req.headers["x-api-key"] !== API_KEY) {
+  if (!isAuthorizedRequest(req, API_KEY)) {
     return res.status(403).send("Unauthorized");
   }
 
@@ -3265,7 +3218,7 @@ app.post("/commandBar/log", async (req, res) => {
 
 app.post("/eventSessions/sync", async (req, res) => {
 
-  if (req.headers["x-api-key"] !== API_KEY) {
+  if (!isAuthorizedRequest(req, API_KEY)) {
     return res.status(403).send("Unauthorized");
   }
 
@@ -3300,7 +3253,7 @@ app.post("/eventSessions/sync", async (req, res) => {
 
 app.post("/revaluationSessions/sync", async (req, res) => {
 
-  if (req.headers["x-api-key"] !== API_KEY) {
+  if (!isAuthorizedRequest(req, API_KEY)) {
     return res.status(403).send("Unauthorized");
   }
 
@@ -3335,7 +3288,7 @@ app.post("/revaluationSessions/sync", async (req, res) => {
 
 app.post("/studio/status", (req, res) => {
 
-  if (req.headers["x-api-key"] !== API_KEY) {
+  if (!isAuthorizedRequest(req, API_KEY)) {
     return res.status(403).send("Unauthorized");
   }
 
@@ -3346,7 +3299,7 @@ app.post("/studio/status", (req, res) => {
 });
 app.post("/adminActions/claim", (req, res) => {
 
-  if (req.headers["x-api-key"] !== API_KEY) {
+  if (!isAuthorizedRequest(req, API_KEY)) {
     return res.status(403).send("Unauthorized");
   }
 
@@ -3385,7 +3338,7 @@ app.post("/adminActions/claim", (req, res) => {
 
 app.post("/adminActions/report", async (req, res) => {
 
-  if (req.headers["x-api-key"] !== API_KEY) {
+  if (!isAuthorizedRequest(req, API_KEY)) {
     return res.status(403).send("Unauthorized");
   }
 
@@ -3410,7 +3363,7 @@ app.post("/adminActions/report", async (req, res) => {
 
 app.post("/talentLookups/claim", (req, res) => {
 
-  if (req.headers["x-api-key"] !== API_KEY) {
+  if (!isAuthorizedRequest(req, API_KEY)) {
     return res.status(403).send("Unauthorized");
   }
 
@@ -3446,7 +3399,7 @@ app.post("/talentLookups/claim", (req, res) => {
 
 app.post("/talentLookups/report", async (req, res) => {
 
-  if (req.headers["x-api-key"] !== API_KEY) {
+  if (!isAuthorizedRequest(req, API_KEY)) {
     return res.status(403).send("Unauthorized");
   }
 
