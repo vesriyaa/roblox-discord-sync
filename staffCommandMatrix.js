@@ -26,6 +26,7 @@ const STAFF_COMMANDS_BY_ROLE = {
     "grouprank",
     "inactivecheck",
     "shutdown",
+    "wave",
   ],
   Owner: [
     "*",
