@@ -2,6 +2,22 @@ const { ChannelType, SlashCommandBuilder } = require("discord.js");
 
 function buildSlashCommands() {
   return [
+    new SlashCommandBuilder().setName("questionnaire").setDescription("Private community check-ins and staff review")
+      .setDMPermission(false)
+      .addSubcommand((s) => s.setName("start").setDescription("Open a timed check-in; everyone can answer once")
+        .addStringOption((o) => o.setName("duration").setDescription("Duration: 30m, 2h, 14d, 2w3d, or plain minutes").setMaxLength(32).setRequired(true))
+        .addChannelOption((o) => o.setName("channel").setDescription("Public panel channel (defaults to this channel)").addChannelTypes(ChannelType.GuildText))
+        .addChannelOption((o) => o.setName("reviewchannel").setDescription("Private review channel; omit to create a locked one").addChannelTypes(ChannelType.GuildText)))
+      .addSubcommand((s) => s.setName("status").setDescription("Show the open or selected check-in")
+        .addStringOption((o) => o.setName("id").setDescription("Optional questionnaire ID")))
+      .addSubcommand((s) => s.setName("close").setDescription("Close the open or selected check-in")
+        .addStringOption((o) => o.setName("id").setDescription("Optional questionnaire ID")))
+      .addSubcommand((s) => s.setName("reviewers").setDescription("List approved 21+ reviewers"))
+      .addSubcommand((s) => s.setName("reviewer").setDescription("Owner: approve or revoke a registered 21+ reviewer")
+        .addUserOption((o) => o.setName("user").setDescription("Registered staff account").setRequired(true))
+        .addBooleanOption((o) => o.setName("approved").setDescription("Grant or revoke review access").setRequired(true))
+        .addBooleanOption((o) => o.setName("confirmed21").setDescription("I confirm this trusted staff member is 21 or older"))),
+    new SlashCommandBuilder().setName("time-off").setDescription("Privately check your time-off request and approved return date").setDMPermission(false),
     new SlashCommandBuilder()
       .setName("verify")
       .setDescription("Verify your Discord account with Roblox OAuth"),

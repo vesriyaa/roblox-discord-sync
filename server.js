@@ -98,6 +98,8 @@ const { createPrivateNoticeService } = require("./src/privateNoticeService");
 const { isAccessManagementChannel } = require("./src/accessManagementPolicy");
 const { createWaveStore } = require("./src/waveStore");
 const { createWaveService } = require("./src/waveService");
+const { createQuestionnaireStore } = require("./src/questionnaireStore");
+const { createQuestionnaireService } = require("./src/questionnaireService");
 
 const app = express();
 app.use(express.json());
@@ -187,6 +189,15 @@ const spreadsheetPermissionService = createSpreadsheetPermissionService({
   url: ADMIN_SHEET_URL,
   cacheTtlMs: ADMIN_SHEET_CACHE_TTL_MS,
   strictMode: ADMIN_SHEET_STRICT,
+});
+const questionnaireService = createQuestionnaireService({
+  client,
+  store: createQuestionnaireStore(),
+  guildId: GUILD_ID,
+  getRegisteredAccess: (discordId) => spreadsheetPermissionService.getRegisteredAccess(discordId),
+  // Explicitly confirmed by the owner as a trusted 21+ reviewer. The database
+  // seed is insert-only, so a later revocation survives restarts.
+  initialReviewerIds: ["1061349305115496449"],
 });
 const EAGER_DEFERRED_COMMANDS = new Set([
   "unlink",
@@ -2366,7 +2377,11 @@ async function handleInactiveCheckCommand(interaction, guild) {
   const inactiveCutoffIso = getInactiveCutoffIso(days, now);
 
   if (subcommand === "preview") {
-    const records = await verificationDb.listInactiveCandidates(inactiveCutoffIso, limit);
+    const candidates = await verificationDb.listInactiveCandidates(inactiveCutoffIso, limit);
+    const records = [];
+    for (const record of candidates) {
+      if (!await questionnaireService.isOnLeave(guild.id, record.discordId)) records.push(record);
+    }
     if (records.length === 0) {
       return sendInteractionResponse(interaction, `No verified users are past the ${days}-day inactivity cutoff.`);
     }
@@ -2384,7 +2399,11 @@ async function handleInactiveCheckCommand(interaction, guild) {
   if (subcommand === "near") {
     const within = getSlashInteger(interaction, "within", INACTIVITY_NEAR_DAYS, 1, days);
     const nearCutoffIso = getInactiveCutoffIso(Math.max(0, days - within), now);
-    const records = await verificationDb.listNearlyInactiveCandidates(nearCutoffIso, inactiveCutoffIso, limit);
+    const candidates = await verificationDb.listNearlyInactiveCandidates(nearCutoffIso, inactiveCutoffIso, limit);
+    const records = [];
+    for (const record of candidates) {
+      if (!await questionnaireService.isOnLeave(guild.id, record.discordId)) records.push(record);
+    }
     if (records.length === 0) {
       return sendInteractionResponse(interaction, `No verified users are within ${within} day${within === 1 ? "" : "s"} of the ${days}-day inactivity cutoff.`);
     }
@@ -2417,6 +2436,12 @@ async function handleInactiveCheckCommand(interaction, guild) {
   const failed = [];
 
   for (const record of records) {
+    // Recheck just before destructive inactivity actions. A pending request is
+    // not an exemption; only approved, unexpired leave protects the member.
+    if (await questionnaireService.isOnLeave(guild.id, record.discordId)) {
+      skipped.push(`<@${record.discordId}>`);
+      continue;
+    }
     const targetMember = await guild.members.fetch(record.discordId).catch(() => null);
     if (targetMember && isMemberInactivityExempt(targetMember)) {
       skipped.push(`<@${record.discordId}>`);
@@ -2514,6 +2539,13 @@ client.once("clientReady", async () => {
   }
 
   try {
+    await questionnaireService.init();
+    console.log("Questionnaire system ready (private staff review).");
+  } catch {
+    console.error("Questionnaire system unavailable; check persistent database configuration.");
+  }
+
+  try {
     await spreadsheetPermissionService.refreshNow();
     const permissionSheetError = spreadsheetPermissionService.getLastError?.();
     if (permissionSheetError) {
@@ -2543,6 +2575,12 @@ client.once("clientReady", async () => {
 // ===============================
 client.on("interactionCreate", async (interaction) => {
   try {
+  // Handle sensitive interactions before generic command logging or role fallbacks.
+  if (interaction.isModalSubmit() && await questionnaireService.handleModal(interaction)) return;
+  if (interaction.isButton() && await questionnaireService.handleButton(interaction)) return;
+  if (interaction.isChatInputCommand() && ["questionnaire", "time-off"].includes(interaction.commandName)) {
+    return questionnaireService.handleCommand(interaction);
+  }
   if (interaction.isModalSubmit()) {
     const waveHandled = await waveService.handleModal(interaction);
     if (waveHandled) {

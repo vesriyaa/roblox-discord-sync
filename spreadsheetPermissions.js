@@ -571,6 +571,14 @@ function createSpreadsheetPermissionService(options = {}) {
 
   return {
     getMemberAccess,
+    // Sensitive reviews require a fresh, exact Discord ID registration. Never
+    // accept display-name matches or fall back to cached access after a failure.
+    async getRegisteredAccess(discordId) {
+      await refreshRecords(true);
+      const record = state.records.filter((entry) => entry.enabled && entry.discordIds.includes(String(discordId)))
+        .sort((a, b) => getRolePriority(b.botRole || b.role) - getRolePriority(a.botRole || a.role))[0] || null;
+      return { configured: hasConfiguredUrl(), record, error: state.lastError, fetchedAt: state.lastFetchedAt };
+    },
     getRolePriority,
     hasConfiguredUrl,
     isStrictMode: () => config.strictMode,
