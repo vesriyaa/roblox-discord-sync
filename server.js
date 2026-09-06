@@ -5025,6 +5025,10 @@ app.get("/privacy", (req, res) => {
         body: "<p>We use linked account information to apply verified roles, process Thornvale wave applications, support account recovery, manage role sync, assist moderation, and connect Roblox game systems with the Thornvale Discord community.</p>",
       },
       {
+        heading: "Optional Community Check-ins and Time Off",
+        body: "<p>If you choose to answer a community questionnaire, we store your Discord ID, the answers you choose to share, the submission time, and any requested time-off duration and staff decision. Wellbeing questions are optional. Submissions are anonymous to the public, but registered, trusted staff explicitly approved as age 21 or older can view your identity and answers privately through the bot for support and time-off review. The bot does not independently verify staff ages.</p><p>Public panels show only the submission count. Review-channel history contains response references, not answers or identities. Discord and the hosting/database providers process and store this information. Approved time off pauses the bot's inactivity-removal actions until the approved return date. Questionnaires are not continuously monitored.</p><p>There is no automatic deletion schedule for questionnaire records. You may contact an approved reviewer privately to request deletion; unlinking a Roblox account does not delete these separate records.</p>",
+      },
+      {
         heading: "Data Retention",
         body: "<p>We retain verification and wave application records while they are needed for Thornvale access, moderation, security, or game functionality. You may request unlinking or deletion through Thornvale staff, subject to records that must be retained for safety or moderation.</p>",
       },
