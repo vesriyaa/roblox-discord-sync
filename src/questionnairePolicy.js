@@ -4,7 +4,7 @@ const QUESTIONS = Object.freeze([
   "Have you experienced or witnessed any harassment, bullying, or behavior that made you uncomfortable?",
   "Do you feel safe and welcomed within the community? Is there anything the staff team could improve or help you with?",
 ]);
-const PRIVACY_NOTICE = "Share only what you’re comfortable sharing; every wellbeing question is optional. If you’d rather talk privately, you’re welcome to message an approved staff member you trust. Your submission is anonymous to the public, not to the review team: your Discord identity and answers are available through this bot only to registered, trusted staff explicitly approved as 21+. Answers are not posted in public or staff-channel messages. Discord and the bot’s hosting/database systems process and store this information. This questionnaire is not monitored continuously.";
+const PRIVACY_NOTICE = "**Mental health and wellbeing questions are completely optional.** You can leave them blank; you do not need to explain why. Only share what you’re comfortable sharing. You can also request time off without answering any wellbeing questions.\n\nIf you’d rather talk privately, you’re welcome to message an approved staff member you trust. Your submission is anonymous to the public, not to the review team: your Discord identity and answers are available through this bot only to registered, trusted staff explicitly approved as 21+. Answers are not posted in public or staff-channel messages. Discord and the bot’s hosting/database systems process and store this information. This questionnaire is not monitored continuously.";
 
 function parseDuration(value, now = Date.now()) {
   const input = String(value ?? "").trim().toLowerCase().replace(/\s+/g, "");

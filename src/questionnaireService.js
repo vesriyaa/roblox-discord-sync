@@ -12,7 +12,7 @@ function buildPanel(s) {
   return { allowedMentions: { parse: [] }, embeds: [new EmbedBuilder()
     .setTitle(open ? "Thornvale Community Check-in" : "Thornvale Community Check-in — Closed")
     .setColor(0x7ba6a0).setDescription(PRIVACY_NOTICE)
-    .addFields(...QUESTIONS.map((question, i) => ({ name: `Question ${i + 1}`, value: question })),
+    .addFields(...QUESTIONS.map((question, i) => ({ name: `Question ${i + 1} — Optional`, value: question })),
       { name: "Submissions", value: String(s.submissionCount || 0), inline: true },
       { name: "Closes", value: `<t:${Math.floor(Date.parse(s.endsAt) / 1000)}:F>`, inline: true },
       { name: "Need time off?", value: "You can request a break when answering. Approved time off pauses inactivity removal until your approved return date. Everyone in the server can answer; one submission per person." })
@@ -22,16 +22,17 @@ function buildPanel(s) {
 
 function buildModal(sessionId, leave) {
   const inputs = [
-    ["mood", "How have you been doing? (1–10)", TextInputStyle.Short, 2],
-    ["mental", "Mental health, struggles, or support needed?", TextInputStyle.Paragraph, 1000],
-    ["harassment", "Harassment, bullying, or discomfort?", TextInputStyle.Paragraph, 1000],
-    ["community", "Safe and welcomed? How can staff help?", TextInputStyle.Paragraph, 1000],
+    ["mood", "Optional: How are you doing? (1–10)", TextInputStyle.Short, 2],
+    ["mental", "Optional: Mental health / support needed", TextInputStyle.Paragraph, 1000],
+    ["harassment", "Optional: Harassment, bullying, or discomfort", TextInputStyle.Paragraph, 1000],
+    ["community", "Optional: Safe and welcomed? Staff feedback", TextInputStyle.Paragraph, 1000],
   ];
   if (leave) inputs.push(["leave", "Requested time off (e.g. 7d or 2w)", TextInputStyle.Short, 32]);
   return new ModalBuilder().setCustomId(`${PREFIX}submit|${sessionId}|${leave ? "leave" : "answers"}`)
     .setTitle("Private community check-in").addComponents(...inputs.map(([id,label,style,max]) =>
       new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(id).setLabel(label)
-        .setStyle(style).setMaxLength(max).setRequired(id === "leave"))));
+        .setStyle(style).setMaxLength(max).setRequired(id === "leave")
+        .setPlaceholder(id === "leave" ? "For example: 7d or 2w" : "Optional — you can leave this blank."))));
 }
 
 function buildQueuePayload(response) {

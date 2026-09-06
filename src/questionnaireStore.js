@@ -41,6 +41,8 @@ function createQuestionnaireStore({ pool } = {}) {
         );
         CREATE INDEX IF NOT EXISTS questionnaire_active_leave
           ON questionnaire_responses(guild_id, discord_id, leave_until) WHERE decision = 'approved';
+        -- Refresh existing open panels after a restart so updated wording appears.
+        UPDATE questionnaire_sessions SET needs_sync=TRUE,version=version+1 WHERE status='open';
       `);
     },
     async seedReviewer(guildId, discordId) {
