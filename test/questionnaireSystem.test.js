@@ -13,7 +13,7 @@ function harness(overrides={}) {
   const calls = { reads:0,sends:[],decisions:0,submits:[] };
   const members = new Map([["reviewer",{user:{id:"reviewer"}}],["member",{user:{id:"member"}}]]);
   const channel = {guildId:"guild",messages:{fetch:async()=>({edit:async(p)=>calls.sends.push(p)})},send:async(p)=>{ calls.sends.push(p);return{id:"queue"}; }};
-  const store = {init:async()=>{},seedReviewer:async()=>{},expireSessions:async()=>{},listSyncSessions:async()=>[],listUndelivered:async()=>[],
+  const store = {init:async()=>{},seedReviewer:async()=>{},expireSessions:async()=>{},listSyncSessions:async()=>[],listUndelivered:async()=>[],listCompletedQueue:async()=>[],
     isReviewer:async(_g,id)=>id==="reviewer",getSession:async()=>session,
     getResponse:async()=>{calls.reads++;return structuredClone(response);},
     submit:async(r)=>{calls.submits.push(r);return{ok:true,response:r};},
@@ -50,9 +50,10 @@ test("no answers or author identity reach public panels or review channel histor
   }
   assert.ok(JSON.stringify(buildPrivateResponse(response)).includes("PRIVATE_MENTAL"));
 });
-test("all requested questions are present and modal answers are optional",()=>{
+test("public dashboard hides questions and modal answers stay optional",()=>{
   const publicText=JSON.stringify(buildPanel(session));
-  for(const question of QUESTIONS) assert.ok(publicText.includes(question));
+  for(const question of QUESTIONS) assert.ok(!publicText.includes(question));
+  assert.match(publicText,/deleted from our live database/);
   const modal=buildModal("session",false).toJSON();
   assert.equal(modal.components.length,4);
   assert.ok(modal.components.every((r)=>r.components[0].required===false));
@@ -124,6 +125,40 @@ test("closed DMs never cause time-off decisions or private answers to be posted 
   const i=h.interaction("reviewer","questionnaire|approve|response");await h.service.handleButton(i);
   assert.equal(h.calls.decisions,1);assert.equal(h.calls.sends.length,0);
   assert.match(i.replies[0].content,/DMs are closed/);
+  assert.ok(!JSON.stringify(i.replies).includes("PRIVATE_"));
+});
+
+test("questions appear only in the member's private introduction",async(t)=>{
+  const h=harness();await h.service.init();t.after(()=>h.service.stop());
+  const i=h.interaction("member","questionnaire|begin|session");await h.service.handleButton(i);
+  for(const question of QUESTIONS) assert.ok(i.replies[0].content.includes(question));
+  assert.ok(i.replies[0].content.length<=2000);
+  assert.equal(h.calls.sends.length,0);
+});
+
+test("finishing a review is authorized and clears the existing private answer view",async(t)=>{
+  let finishes=0;
+  const h=harness({store:{finishReview:async()=>{finishes++;return{id:"response"};}}});
+  await h.service.init();t.after(()=>h.service.stop());
+  const denied=h.interaction("member","questionnaire|finish|response");await h.service.handleButton(denied);
+  assert.equal(finishes,0);
+  const i=h.interaction("reviewer","questionnaire|finish|response");
+  i.message={flags:{has:()=>true}};
+  i.deferUpdate=async()=>{i.deferred=true;};
+  await h.service.handleButton(i);
+  assert.equal(finishes,1);
+  assert.match(i.replies[0].content,/deleted/);
+  assert.deepEqual(i.replies[0].embeds,[]);assert.deepEqual(i.replies[0].components,[]);
+  assert.ok(!JSON.stringify(i.replies).includes("PRIVATE_"));
+});
+
+test("completed review indexes lose their view button on reconciliation",async(t)=>{
+  const cleaned=[];
+  const h=harness({store:{listCompletedQueue:async()=>[{id:"done",guildId:"guild",reviewChannelId:"review",queueMessageId:"queue"}],markQueueCleaned:async(id)=>cleaned.push(id)}});
+  await h.service.init();t.after(()=>h.service.stop());
+  assert.deepEqual(cleaned,["done"]);
+  assert.deepEqual(h.calls.sends[0].components,[]);
+  assert.ok(!JSON.stringify(h.calls.sends).includes("PRIVATE_"));
 });
 test("inactivity actions fail closed until time-off storage is ready",async()=>{
   const h=harness();assert.throws(()=>h.service.isOnLeave("guild","member"),/paused/);

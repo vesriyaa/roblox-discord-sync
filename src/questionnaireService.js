@@ -1,6 +1,6 @@
 const crypto = require("crypto");
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, ModalBuilder,
-  TextInputBuilder, TextInputStyle, PermissionFlagsBits: P, OverwriteType } = require("discord.js");
+  TextInputBuilder, TextInputStyle, PermissionFlagsBits: P, OverwriteType, MessageFlags } = require("discord.js");
 const { QUESTIONS, PRIVACY_NOTICE, parseDuration, isRegisteredRecord, readAnswers } = require("./questionnairePolicy");
 const PREFIX = "questionnaire|";
 const button = (id, label, style = ButtonStyle.Primary) => new ButtonBuilder().setCustomId(PREFIX + id).setLabel(label).setStyle(style);
@@ -12,7 +12,7 @@ function buildPanel(s) {
   return { allowedMentions: { parse: [] }, embeds: [new EmbedBuilder()
     .setTitle(open ? "Thornvale Community Check-in" : "Thornvale Community Check-in — Closed")
     .setColor(0x7ba6a0).setDescription(PRIVACY_NOTICE)
-    .addFields(...QUESTIONS.map((question, i) => ({ name: `Question ${i + 1} — Optional`, value: question })),
+    .addFields(
       { name: "Submissions", value: String(s.submissionCount || 0), inline: true },
       { name: "Closes", value: `<t:${Math.floor(Date.parse(s.endsAt) / 1000)}:F>`, inline: true },
       { name: "Need time off?", value: "You can request a break when answering. Approved time off pauses inactivity removal until your approved return date. Everyone in the server can answer; one submission per person." })
@@ -49,10 +49,11 @@ function buildPrivateResponse(r) {
   ];
   if (r.leaveUntil) fields.push({ name: "Approved until", value: `<t:${Math.floor(Date.parse(r.leaveUntil) / 1000)}:F>` });
   if (r.reviewerId) fields.push({ name: "Reviewed by", value: `<@${r.reviewerId}>` });
-  return { allowedMentions: { parse: [] }, content: "Confidential staff view. Do not copy or share these answers outside the approved review team.",
+  return { allowedMentions: { parse: [] }, content: "Confidential staff view. Do not copy or share these answers. Finishing this review permanently deletes the questionnaire response and answers from the live database. Approving or declining time off also finishes the review.",
     embeds: [new EmbedBuilder().setTitle("Private community check-in").setColor(0x7ba6a0).addFields(fields).setFooter({ text: r.id })],
-    components: r.decision === "pending" ? [row(button(`approve|${r.id}`, "Approve time off", ButtonStyle.Success),
-      button(`deny|${r.id}`, "Decline time off", ButtonStyle.Secondary))] : [] };
+    components: r.decision === "pending" ? [row(button(`approve|${r.id}`, "Approve + finish review", ButtonStyle.Success),
+      button(`deny|${r.id}`, "Decline + finish review", ButtonStyle.Secondary))]
+      : [row(button(`finish|${r.id}`, "Finish review + delete answers", ButtonStyle.Success))] };
 }
 
 function createQuestionnaireService({ client, store, guildId, getRegisteredAccess, initialReviewerIds = [], logger = console }) {
@@ -140,6 +141,19 @@ function createQuestionnaireService({ client, store, guildId, getRegisteredAcces
           await store.markDelivered(response.id,message.id);
         } catch { logger.warn("Questionnaire review index delivery will retry."); }
       }
+      for (const completed of await store.listCompletedQueue()) {
+        if (completed.guildId !== guildId) continue;
+        try {
+          const channel = await client.channels.fetch(completed.reviewChannelId);
+          if (channel?.guildId !== guildId) continue;
+          const message = await channel.messages.fetch(completed.queueMessageId);
+          await message.edit({ content:"Review completed. The questionnaire response and answers were deleted from the live database.",embeds:[],components:[],allowedMentions:{parse:[]} });
+          await store.markQueueCleaned(completed.id);
+        } catch (error) {
+          if ([10003,10008].includes(error.code)) await store.markQueueCleaned(completed.id);
+          else logger.warn("Completed questionnaire index cleanup will retry.");
+        }
+      }
     })().finally(() => { reconciling = null; });
     return reconciling;
   }
@@ -214,27 +228,40 @@ function createQuestionnaireService({ client, store, guildId, getRegisteredAcces
       if (!await availableSession(i,id)) { await reply(i,"This questionnaire is closed or unavailable."); return true; }
       await i.showModal(buildModal(id,mode === "leave")); return true;
     }
-    await defer(i);
+    if (["finish","approve","deny"].includes(action) && i.message?.flags?.has(MessageFlags.Ephemeral)) {
+      // Replace this private answer view with the deletion receipt after completion.
+      await i.deferUpdate();
+    } else await defer(i);
     if (action === "begin") {
       if (!await availableSession(i,id)) { await reply(i,"This questionnaire is closed or unavailable."); return true; }
       await reply(i,{ content: `${PRIVACY_NOTICE}\n\n${QUESTIONS.map((q,n) => `${n+1}. ${q}`).join("\n\n")}`,
         components:[row(button(`form|${id}|answers`,"Answer only"),button(`form|${id}|leave`,"Answer + request time off",ButtonStyle.Secondary))] });
       return true;
     }
-    if (!["view","approve","deny"].includes(action)) { await reply(i,"Unknown questionnaire action."); return true; }
+    if (!["view","approve","deny","finish"].includes(action)) { await reply(i,"Unknown questionnaire action."); return true; }
     if (!await requireReviewer(i)) return true;
     let response = await store.getResponse(id,guildId);
-    if (!response) { await reply(i,"This response is unavailable."); return true; }
+    if (!response) { await reply(i,"This response is unavailable or has already been reviewed and deleted."); return true; }
+    if (action === "finish") {
+      const completed = await store.finishReview(id,guildId,i.user.id);
+      if (completed?.code === "PENDING") { await reply(i,"Approve or decline the pending time-off request to finish this review and delete its answers."); return true; }
+      scheduleSync();
+      await reply(i,completed ? "Review completed. The questionnaire response and answers were deleted from the live database." : "This response was already reviewed and deleted.");
+      return true;
+    }
     if (action !== "view") {
       response = await store.decide(id,guildId,i.user.id,action === "approve" ? "approved" : "denied");
       if (!response) { await reply(i,"This request was already reviewed, or did not request time off."); return true; }
+      scheduleSync();
       // Only the requester receives the decision. No public fallback if DMs are closed.
       try {
         const user = await client.users.fetch(response.discordId);
         await user.send({ content: response.decision === "approved"
           ? `Your Thornvale time-off request is approved until <t:${Math.floor(Date.parse(response.leaveUntil)/1000)}:F>. Inactivity removal is paused until then. You can check /time-off privately.`
           : "Your Thornvale time-off request was declined. You can contact an approved staff member privately or check /time-off.", allowedMentions:{parse:[]} });
-      } catch { await reply(i,{...buildPrivateResponse(response),content:"Decision saved. Their DMs are closed; they can check /time-off privately."}); return true; }
+      } catch { await reply(i,"Review completed and questionnaire answers deleted from the live database. The time-off decision was saved. Their DMs are closed; they can check /time-off privately."); return true; }
+      await reply(i,"Review completed and questionnaire answers deleted from the live database. The time-off decision was saved and sent privately to the requester.");
+      return true;
     }
     await reply(i,buildPrivateResponse(response)); return true;
   }

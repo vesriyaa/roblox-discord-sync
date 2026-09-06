@@ -13,6 +13,29 @@ function createQuestionnaireStore({ pool } = {}) {
       ssl: String(process.env.DATABASE_SSL).toLowerCase() === "false" ? false : { rejectUnauthorized: false } });
   }
   const one = async (sql, args) => normalize((await pool.query(sql, args)).rows[0]);
+  async function completeReview(id, guildId, reviewerId, decision = null) {
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      const r = normalize((await c.query("SELECT * FROM questionnaire_responses WHERE id=$1 AND guild_id=$2 FOR UPDATE", [id,guildId])).rows[0]);
+      if (!r || (decision && r.decision !== "pending")) { await c.query("ROLLBACK"); return null; }
+      if (!decision && r.decision === "pending") { await c.query("ROLLBACK"); return { code:"PENDING" }; }
+      let leave = null;
+      if (decision) {
+        leave = normalize((await c.query(`INSERT INTO questionnaire_time_off
+          (id,guild_id,discord_id,decision,leave_until,reviewed_at,created_at)
+          VALUES($1,$2,$3,$4,CASE WHEN $4='approved' THEN NOW()+$5::bigint*INTERVAL '1 millisecond' ELSE NULL END,NOW(),$6)
+          RETURNING decision,leave_until`, [id,guildId,r.discordId,decision,r.leaveDurationMs,r.createdAt])).rows[0]);
+      }
+      await c.query(`INSERT INTO questionnaire_receipts(session_id,discord_id,response_id,completed_at,queue_message_id)
+        VALUES($1,$2,$3,NOW(),$4) ON CONFLICT(session_id,discord_id) DO UPDATE SET completed_at=NOW()`, [r.sessionId,r.discordId,id,r.queueMessageId]);
+      await c.query("DELETE FROM questionnaire_responses WHERE id=$1 AND guild_id=$2", [id,guildId]);
+      await c.query("COMMIT");
+      // Never return the deleted answers to a Discord reply or notification.
+      return { id,discordId:r.discordId,decision:leave?.decision || "reviewed",leaveUntil:leave?.leaveUntil || null };
+    } catch (error) { await c.query("ROLLBACK").catch(() => {}); throw error; }
+    finally { c.release(); }
+  }
   return {
     type: "postgres",
     async init() {
@@ -41,8 +64,29 @@ function createQuestionnaireStore({ pool } = {}) {
         );
         CREATE INDEX IF NOT EXISTS questionnaire_active_leave
           ON questionnaire_responses(guild_id, discord_id, leave_until) WHERE decision = 'approved';
-        -- Refresh existing open panels after a restart so updated wording appears.
-        UPDATE questionnaire_sessions SET needs_sync=TRUE,version=version+1 WHERE status='open';
+        CREATE TABLE IF NOT EXISTS questionnaire_receipts (
+          session_id TEXT NOT NULL REFERENCES questionnaire_sessions(id), discord_id TEXT NOT NULL,
+          response_id TEXT NOT NULL UNIQUE, completed_at TIMESTAMPTZ, queue_message_id TEXT,
+          PRIMARY KEY(session_id,discord_id)
+        );
+        CREATE TABLE IF NOT EXISTS questionnaire_time_off (
+          id TEXT PRIMARY KEY, guild_id TEXT NOT NULL, discord_id TEXT NOT NULL,
+          decision TEXT NOT NULL, leave_until TIMESTAMPTZ, reviewed_at TIMESTAMPTZ NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS questionnaire_time_off_active
+          ON questionnaire_time_off(guild_id,discord_id,leave_until) WHERE decision='approved';
+        INSERT INTO questionnaire_receipts(session_id,discord_id,response_id,completed_at,queue_message_id)
+          SELECT session_id,discord_id,id,CASE WHEN decision IN ('approved','denied') THEN reviewed_at ELSE NULL END,queue_message_id
+          FROM questionnaire_responses ON CONFLICT(session_id,discord_id) DO UPDATE
+          SET completed_at=COALESCE(questionnaire_receipts.completed_at,EXCLUDED.completed_at);
+        INSERT INTO questionnaire_time_off(id,guild_id,discord_id,decision,leave_until,reviewed_at,created_at)
+          SELECT id,guild_id,discord_id,decision,leave_until,reviewed_at,created_at FROM questionnaire_responses
+          WHERE decision IN ('approved','denied') AND reviewed_at IS NOT NULL ON CONFLICT DO NOTHING;
+        -- Previously decided time-off submissions have already been reviewed.
+        DELETE FROM questionnaire_responses WHERE decision IN ('approved','denied') AND reviewed_at IS NOT NULL;
+        -- Refresh existing dashboards, including closed rounds, after deployment.
+        UPDATE questionnaire_sessions SET needs_sync=TRUE,version=version+1;
       `);
     },
     async seedReviewer(guildId, discordId) {
@@ -94,6 +138,9 @@ function createQuestionnaireStore({ pool } = {}) {
         if (!session || session.guildId !== r.guildId || session.status !== "open" || Date.parse(session.endsAt) <= Date.now()) {
           await c.query("ROLLBACK"); return { ok: false, code: "CLOSED" };
         }
+        const receipt = (await c.query(`INSERT INTO questionnaire_receipts(session_id,discord_id,response_id)
+          VALUES($1,$2,$3) ON CONFLICT(session_id,discord_id) DO NOTHING RETURNING response_id`, [r.sessionId,r.discordId,r.id])).rows[0];
+        if (!receipt) { await c.query("ROLLBACK"); return { ok:false,code:"DUPLICATE" }; }
         const response = normalize((await c.query(`INSERT INTO questionnaire_responses
           (id,session_id,guild_id,discord_id,answers,leave_duration_ms,decision) VALUES($1,$2,$3,$4,$5,$6,$7)
           ON CONFLICT(session_id,discord_id) DO NOTHING RETURNING *`,
@@ -115,21 +162,33 @@ function createQuestionnaireStore({ pool } = {}) {
         WHERE r.queue_message_id IS NULL ORDER BY r.created_at LIMIT 100`)).rows.map(normalize);
     },
     async markDelivered(id, messageId) {
-      await pool.query("UPDATE questionnaire_responses SET queue_message_id=$2 WHERE id=$1", [id,messageId]);
+      await pool.query(`WITH receipt AS (
+        UPDATE questionnaire_receipts SET queue_message_id=$2 WHERE response_id=$1 RETURNING response_id
+      ) UPDATE questionnaire_responses SET queue_message_id=$2 WHERE id IN (SELECT response_id FROM receipt)`, [id,messageId]);
+    },
+    async listCompletedQueue() {
+      return (await pool.query(`SELECT r.response_id AS id,r.queue_message_id,s.guild_id,s.review_channel_id
+        FROM questionnaire_receipts r JOIN questionnaire_sessions s ON s.id=r.session_id
+        WHERE r.completed_at IS NOT NULL AND r.queue_message_id IS NOT NULL LIMIT 100`)).rows.map(normalize);
+    },
+    async markQueueCleaned(id) {
+      await pool.query("UPDATE questionnaire_receipts SET queue_message_id=NULL WHERE response_id=$1 AND completed_at IS NOT NULL", [id]);
     },
     async decide(id, guildId, reviewerId, decision) {
       if (!["approved","denied"].includes(decision)) throw new Error("Invalid decision");
-      return one(`UPDATE questionnaire_responses SET decision=$4,reviewer_id=$3,reviewed_at=NOW(),
-        leave_until=CASE WHEN $4='approved' THEN NOW() + leave_duration_ms * INTERVAL '1 millisecond' ELSE NULL END
-        WHERE id=$1 AND guild_id=$2 AND decision='pending' AND leave_duration_ms IS NOT NULL RETURNING *`, [id,guildId,reviewerId,decision]);
+      return completeReview(id,guildId,reviewerId,decision);
     },
+    finishReview: (id,guildId,reviewerId) => completeReview(id,guildId,reviewerId),
     async isOnLeave(guildId, discordId) {
-      return Boolean(await one(`SELECT id FROM questionnaire_responses WHERE guild_id=$1 AND discord_id=$2
+      return Boolean(await one(`SELECT id FROM questionnaire_time_off WHERE guild_id=$1 AND discord_id=$2
         AND decision='approved' AND leave_until>NOW() LIMIT 1`, [guildId,discordId]));
     },
     async getOwnLeave(guildId, discordId) {
-      return one(`SELECT decision,leave_until,reviewed_at FROM questionnaire_responses WHERE guild_id=$1 AND discord_id=$2
-        AND leave_duration_ms IS NOT NULL ORDER BY created_at DESC LIMIT 1`, [guildId,discordId]);
+      return one(`SELECT decision,leave_until,reviewed_at FROM (
+        SELECT decision,leave_until,reviewed_at,created_at FROM questionnaire_time_off WHERE guild_id=$1 AND discord_id=$2
+        UNION ALL SELECT decision,leave_until,reviewed_at,created_at FROM questionnaire_responses
+        WHERE guild_id=$1 AND discord_id=$2 AND leave_duration_ms IS NOT NULL
+      ) requests ORDER BY created_at DESC LIMIT 1`, [guildId,discordId]);
     },
   };
 }
