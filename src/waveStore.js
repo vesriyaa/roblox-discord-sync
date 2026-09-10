@@ -171,6 +171,16 @@ function createMemoryStore() {
         .sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt))
         .map(cloneApplication);
     },
+    async revokeAcceptedApplications(discordId, robloxUserId) {
+      for (const application of applications.values()) {
+        if (application.status === "accepted" && application.discordId === String(discordId)
+          && application.robloxUserId === String(robloxUserId)) {
+          application.status = "revoked";
+          application.statusMessage = "Access revoked after Discord departure or unwave.";
+          application.updatedAt = new Date().toISOString();
+        }
+      }
+    },
     async findAcceptedApplication(discordId, robloxUserId) {
       const matches = Array.from(applications.values())
         .filter((application) => (
@@ -451,6 +461,12 @@ function createPostgresStore() {
         [String(discordId), String(robloxUserId)]
       );
       return normalizeApplication(result.rows[0]);
+    },
+    async revokeAcceptedApplications(discordId, robloxUserId) {
+      await pool.query(`UPDATE wave_applications SET status='revoked',
+        status_message='Access revoked after Discord departure or unwave.', updated_at=NOW()
+        WHERE discord_id=$1 AND roblox_user_id=$2 AND status='accepted'`,
+      [String(discordId), String(robloxUserId)]);
     },
     async updateApplicationContext(id, { applicantThreadId } = {}) {
       const result = await pool.query(

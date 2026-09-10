@@ -7,6 +7,7 @@ const {
   Client,
   EmbedBuilder,
   GatewayIntentBits,
+  Partials,
 } = require("discord.js");
 const { createSpreadsheetPermissionService } = require("./spreadsheetPermissions");
 const {
@@ -43,6 +44,7 @@ const {
   INACTIVITY_NEAR_DAYS,
   INTERACTION_FOLLOW_UP_WINDOW_MS,
   MEMBER_COMMAND_ROLE_IDS,
+  MEMBER_LEAVE_CHANNEL_ID,
   MOD_ROLE_ID,
   PUBLIC_BASE_URL,
   ROBLOX_OAUTH_CLIENT_ID,
@@ -100,6 +102,9 @@ const { createWaveStore } = require("./src/waveStore");
 const { createWaveService } = require("./src/waveService");
 const { createQuestionnaireStore } = require("./src/questionnaireStore");
 const { createQuestionnaireService } = require("./src/questionnaireService");
+const { softenEmbed } = require("./src/webhookColors");
+const { createMemberDepartureStore } = require("./src/memberDepartureStore");
+const { createMemberDepartureService } = require("./src/memberDepartureService");
 
 const app = express();
 app.use(express.json());
@@ -108,6 +113,7 @@ app.use(express.urlencoded({ extended: false }));
 const verificationDb = createVerificationDatabase();
 
 const client = new Client({
+  partials: [Partials.GuildMember, Partials.User],
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
@@ -122,6 +128,12 @@ const robloxGroupService = createRobloxGroupService({
   cookie: process.env.ROBLOX_COOKIE,
 });
 const waveStore = createWaveStore();
+const memberDepartureService = createMemberDepartureService({
+  client, guildId: GUILD_ID, channelId: MEMBER_LEAVE_CHANNEL_ID,
+  verificationDb, waveStore, robloxGroupService,
+  store: createMemberDepartureStore(), unwavedRoleId: UNWAVED_ROLE_ID,
+  wavedRoleIds: [ENVISIONED_ROLE_ID, ...Object.values(roleMap)],
+});
 const bulkAccessService = createBulkAccessService({
   verificationDb,
   verifiedRoleId: VERIFIED_ROLE_ID,
@@ -915,9 +927,9 @@ function buildRelayMessagePayload(body) {
   }
 
   if (embeds.length > 0) {
-    messagePayload.embeds = embeds;
+    messagePayload.embeds = embeds.map(softenEmbed);
   } else if (fallbackEmbed) {
-    messagePayload.embeds = [fallbackEmbed];
+    messagePayload.embeds = [softenEmbed(fallbackEmbed)];
   }
 
   if (body?.allowedMentions) {
@@ -2519,6 +2531,16 @@ async function handleEventSummaryCommand(interaction, mode, member) {
 // ===============================
 // BOT READY
 // ===============================
+let departureReady = false;
+const pendingDepartures = [];
+client.on("guildMemberRemove", member => {
+  if (!departureReady) { pendingDepartures.push(member); return; }
+  memberDepartureService.handleDeparture(member).catch(error => {
+    pendingDepartures.push(member);
+    console.error("[MemberDeparture] Event failed", member.id, String(error.code || "EVENT_FAILED"));
+  });
+});
+
 client.once("clientReady", async () => {
   console.log("Bot is online");
 
@@ -2537,6 +2559,22 @@ client.once("clientReady", async () => {
   } catch (err) {
     console.error("Wave system failed to initialize:", err);
   }
+
+  const reconcileDepartures = async () => {
+    try {
+      await memberDepartureService.init();
+      departureReady = true;
+      while (pendingDepartures.length) {
+        await memberDepartureService.handleDeparture(pendingDepartures[0]);
+        pendingDepartures.shift();
+      }
+      await memberDepartureService.reconcile();
+    } catch (error) {
+      console.error("[MemberDeparture] Reconciliation unavailable", String(error.code || "INIT_FAILED"));
+    }
+  };
+  void reconcileDepartures();
+  setInterval(reconcileDepartures, 15 * 60_000).unref();
 
   try {
     await questionnaireService.init();

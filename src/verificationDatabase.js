@@ -76,6 +76,9 @@ function createMemoryStore() {
 
   return {
     type: "memory",
+    async listVerifications() {
+      return Array.from(linksByDiscord.values(), link => ({ ...link }));
+    },
     async init() {
       console.warn("[VerificationDB] DATABASE_URL is not configured; using in-memory verification storage.");
     },
@@ -238,6 +241,10 @@ function createPostgresStore() {
 
   return {
     type: "postgres",
+    async listVerifications() {
+      const result = await query("SELECT * FROM roblox_discord_links ORDER BY discord_id");
+      return result.rows.map(normalizeLink);
+    },
     async init() {
       await query(`
         CREATE TABLE IF NOT EXISTS roblox_discord_links (
