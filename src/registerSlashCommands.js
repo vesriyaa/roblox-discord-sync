@@ -2,6 +2,9 @@ const { ChannelType, SlashCommandBuilder } = require("discord.js");
 
 function buildSlashCommands() {
   return [
+    new SlashCommandBuilder().setName("ranger-pass").setDescription("Pass a candidate from a completed Ranger trial").setDMPermission(false)
+      .addStringOption((o) => o.setName("trial").setDescription("Trial ID from the review roster").setRequired(true).setMaxLength(36))
+      .addStringOption((o) => o.setName("userid").setDescription("Candidate's Roblox user ID").setRequired(true).setMaxLength(20)),
     new SlashCommandBuilder().setName("questionnaire").setDescription("Private community check-ins and staff review")
       .setDMPermission(false)
       .addSubcommand((s) => s.setName("start").setDescription("Open a timed check-in; everyone can answer once")
@@ -323,5 +326,6 @@ async function registerSlashCommands(guild) {
 }
 
 module.exports = {
+  buildSlashCommands,
   registerSlashCommands,
 };

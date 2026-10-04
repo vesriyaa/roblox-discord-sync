@@ -105,6 +105,7 @@ const { createQuestionnaireService } = require("./src/questionnaireService");
 const { softenEmbed } = require("./src/webhookColors");
 const { createMemberDepartureStore } = require("./src/memberDepartureStore");
 const { createMemberDepartureService } = require("./src/memberDepartureService");
+const { createRangerTrialService } = require("./src/rangerTrialService");
 
 const app = express();
 app.use(express.json());
@@ -180,6 +181,14 @@ const webhookService = createWebhookService({
   buildRelayComponents,
 });
 const gameApiSpec = createGameApiOpenApiSpec(PUBLIC_BASE_URL);
+const rangerTrialService = createRangerTrialService({
+  client, apiKey: API_KEY, guildId: GUILD_ID,
+  async canReview(interaction) {
+    const { member } = await getInteractionMember(interaction);
+    return hasAdminPermissions(member, "ranger-pass");
+  },
+});
+app.use("/api/v1/ranger-trials", rangerTrialService.router);
 
 app.get("/api/openapi.json", (req, res) => res.json(gameApiSpec));
 app.get("/docs", (req, res) => res.type("html").send(createGameApiDocsHtml()));
@@ -2577,6 +2586,12 @@ client.once("clientReady", async () => {
   setInterval(reconcileDepartures, 15 * 60_000).unref();
 
   try {
+    await rangerTrialService.init();
+  } catch {
+    console.error("Ranger trial reviews unavailable; check persistent database configuration.");
+  }
+
+  try {
     await questionnaireService.init();
     console.log("Questionnaire system ready (private staff review).");
   } catch {
@@ -2613,6 +2628,7 @@ client.once("clientReady", async () => {
 // ===============================
 client.on("interactionCreate", async (interaction) => {
   try {
+  if (interaction.isChatInputCommand() && interaction.commandName === "ranger-pass") return rangerTrialService.handleCommand(interaction);
   // Handle sensitive interactions before generic command logging or role fallbacks.
   if (interaction.isModalSubmit() && await questionnaireService.handleModal(interaction)) return;
   if (interaction.isButton() && await questionnaireService.handleButton(interaction)) return;
