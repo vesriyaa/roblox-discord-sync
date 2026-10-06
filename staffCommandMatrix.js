@@ -12,6 +12,7 @@ const STAFF_COMMANDS_BY_ROLE = {
     "requestban",
   ],
   LoreTeam: [
+    "eventpanel",
     "rangerpass",
     "unwipe",
     "wipe",

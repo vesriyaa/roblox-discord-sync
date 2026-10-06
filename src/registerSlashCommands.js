@@ -1,7 +1,9 @@
 const { ChannelType, SlashCommandBuilder } = require("discord.js");
+const { buildEventPanelCommand } = require("./eventPanelService");
 
 function buildSlashCommands() {
   return [
+    buildEventPanelCommand(),
     new SlashCommandBuilder().setName("ranger-pass").setDescription("Pass a candidate from a completed Ranger trial").setDMPermission(false)
       .addStringOption((o) => o.setName("trial").setDescription("Trial ID from the review roster").setRequired(true).setMaxLength(36))
       .addStringOption((o) => o.setName("userid").setDescription("Candidate's Roblox user ID").setRequired(true).setMaxLength(20)),

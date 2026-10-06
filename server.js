@@ -106,6 +106,8 @@ const { softenEmbed } = require("./src/webhookColors");
 const { createMemberDepartureStore } = require("./src/memberDepartureStore");
 const { createMemberDepartureService } = require("./src/memberDepartureService");
 const { createRangerTrialService } = require("./src/rangerTrialService");
+const { createEventPanelStore } = require("./src/eventPanelStore");
+const { createEventPanelService } = require("./src/eventPanelService");
 
 const app = express();
 app.use(express.json());
@@ -189,6 +191,13 @@ const rangerTrialService = createRangerTrialService({
   },
 });
 app.use("/api/v1/ranger-trials", rangerTrialService.router);
+const eventPanelService = createEventPanelService({
+  client, guildId: GUILD_ID, store: createEventPanelStore(),
+  async canManage(interaction) {
+    const { member } = await getInteractionMember(interaction);
+    return hasAdminPermissions(member, "eventpanel");
+  },
+});
 
 app.get("/api/openapi.json", (req, res) => res.json(gameApiSpec));
 app.get("/docs", (req, res) => res.type("html").send(createGameApiDocsHtml()));
@@ -2035,6 +2044,7 @@ function getStudioQueueStatus() {
   return {
     ok: true,
     botReady: client.isReady(),
+    eventPanelsReady: eventPanelService.isReady(),
     uptimeSeconds: Math.floor(process.uptime()),
     adminActions: {
       pending: countRecords(adminActions, "pending"),
@@ -2586,6 +2596,13 @@ client.once("clientReady", async () => {
   setInterval(reconcileDepartures, 15 * 60_000).unref();
 
   try {
+    await eventPanelService.init();
+    console.log("Event panels ready (persistent RSVP storage).");
+  } catch {
+    console.error("Event panels unavailable; check persistent database configuration.");
+  }
+
+  try {
     await rangerTrialService.init();
   } catch {
     console.error("Ranger trial reviews unavailable; check persistent database configuration.");
@@ -2628,6 +2645,8 @@ client.once("clientReady", async () => {
 // ===============================
 client.on("interactionCreate", async (interaction) => {
   try {
+  if (interaction.isChatInputCommand() && interaction.commandName === "eventpanel") return await eventPanelService.handleCommand(interaction);
+  if (interaction.isButton() && await eventPanelService.handleButton(interaction)) return;
   if (interaction.isChatInputCommand() && interaction.commandName === "ranger-pass") return rangerTrialService.handleCommand(interaction);
   // Handle sensitive interactions before generic command logging or role fallbacks.
   if (interaction.isModalSubmit() && await questionnaireService.handleModal(interaction)) return;
