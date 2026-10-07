@@ -57,6 +57,13 @@ function parseWaveDuration(value) {
 
 function parseRobloxIdentity(value) {
   const input = String(value || "").trim();
+  // The modal prefills "Username (User ID)". Numeric usernames are valid,
+  // so resolve this structure before the legacy first-number ID fallback.
+  const pair = input.match(/^([A-Za-z0-9_]{3,20})\s*\(\s*(\d{1,20})\s*\)$/)
+    || input.match(/^([A-Za-z0-9_]{3,20})[\s,|:;-]+(\d{1,20})$/);
+  if (pair) {
+    return { robloxUsername: pair[1], robloxUserId: pair[2] };
+  }
   const idMatch = input.match(/\b\d{1,20}\b/);
   if (!idMatch) {
     return null;

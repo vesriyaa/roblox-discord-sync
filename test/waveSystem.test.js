@@ -45,6 +45,64 @@ test("wave application identity must match the OAuth verification", () => {
   }), false);
 });
 
+test("wave identity keeps numeric usernames separate from their user IDs", () => {
+  const verification = { verified: true, robloxUsername: "111068", robloxUserId: "26397613" };
+  for (const input of ["111068 (26397613)", " 111068 ( 26397613 ) ", "111068 26397613", "111068 | 26397613"]) {
+    const identity = parseRobloxIdentity(input);
+    assert.deepEqual(identity, { robloxUsername: "111068", robloxUserId: "26397613" });
+    assert.equal(isMatchingVerification(identity, verification), true);
+  }
+  assert.equal(isMatchingVerification(parseRobloxIdentity("26397613 (111068)"), verification), false);
+  assert.equal(isMatchingVerification(parseRobloxIdentity("111068 (999999)"), verification), false);
+  assert.equal(isMatchingVerification(parseRobloxIdentity("SomeoneElse (26397613)"), verification), false);
+  assert.equal(isMatchingVerification(parseRobloxIdentity("111068 (26397613)"), { ...verification, verified: false }), false);
+  assert.equal(parseRobloxIdentity("111068"), null);
+  assert.deepEqual(parseRobloxIdentity("000123 (456789)"), { robloxUsername: "000123", robloxUserId: "456789" });
+  assert.deepEqual(parseRobloxIdentity("123456 Builder_One"), { robloxUsername: "Builder_One", robloxUserId: "123456" });
+});
+
+test("numeric username survives the prefilled application modal and verification gate", async () => {
+  const verification = { verified: true, robloxUsername: "111068", robloxUserId: "26397613" };
+  let modal;
+  let reserved;
+  let response;
+  const service = createWaveService({
+    client: {},
+    store: {
+      async getSession() { return session({ applicationLimit: 5 }); },
+      async reserveApplication(application) {
+        reserved = application;
+        return { ok: false, code: "ALREADY_APPLIED" };
+      },
+    },
+    verificationService: { async lookup() { return verification; } },
+  });
+  await service.handleButton({
+    customId: "wave|apply|TV-WAVE-TEST",
+    user: { id: "numeric-user" },
+    async showModal(value) { modal = value.toJSON(); },
+  });
+  const prefilled = modal.components[0].components[0].value;
+  assert.equal(prefilled, "111068 (26397613)");
+  const submit = {
+    customId: "wave|submit|TV-WAVE-TEST",
+    user: { id: "numeric-user" },
+    fields: { getTextInputValue(field) { return field === "roblox_identity" ? prefilled : "A complete application answer."; } },
+    async deferReply() {},
+    async editReply(text) { response = text; },
+  };
+  await service.handleModal(submit);
+  assert.equal(reserved.robloxUsername, verification.robloxUsername);
+  assert.equal(reserved.robloxUserId, verification.robloxUserId);
+  assert.match(response, /already submitted/i);
+
+  reserved = null;
+  submit.fields.getTextInputValue = () => "111068 (999999)";
+  await service.handleModal(submit);
+  assert.equal(reserved, null);
+  assert.match(response, /must match the account connected/i);
+});
+
 test("wave durations accept shorthand, compounds, and legacy minute values", () => {
   assert.equal(parseWaveDuration("30m"), 30 * 60_000);
   assert.equal(parseWaveDuration("1h"), 60 * 60_000);
